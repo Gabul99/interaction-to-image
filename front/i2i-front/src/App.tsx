@@ -7,8 +7,9 @@ import FeedbackTooltip, {
   type FeedbackData,
 } from "./components/FeedbackTooltip";
 import Toolbar from "./components/Toolbar";
+import ImageHistoryNavigator from "./components/ImageHistoryNavigator";
 import { type ToolMode, type InteractionData } from "./types";
-import doridoriImage from "./assets/doridori.png";
+import { useImageStore } from "./stores/imageStore";
 
 const AppContainer = styled.div`
   height: 100vh;
@@ -130,11 +131,168 @@ const GlobalSendButton = styled.button`
   }
 `;
 
+const ProgressContainer = styled.div`
+  margin-top: 12px;
+  width: 100%;
+  max-width: 512px;
+`;
+
+const ProgressBar = styled.div`
+  width: 100%;
+  height: 8px;
+  background: rgba(55, 65, 81, 0.5);
+  border-radius: 4px;
+  overflow: hidden;
+`;
+
+const ProgressFill = styled.div<{ progress: number }>`
+  height: 100%;
+  width: ${(props) => props.progress}%;
+  background: linear-gradient(90deg, #6366f1 0%, #8b5cf6 100%);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+`;
+
+const ProgressText = styled.div`
+  margin-top: 8px;
+  text-align: center;
+  font-size: 12px;
+  color: #9ca3af;
+`;
+
+const LatestImageButton = styled.button<{ visible: boolean }>`
+  position: fixed;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1000;
+  background: rgba(26, 26, 46, 0.9);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  padding: 12px 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f9fafb;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  opacity: ${(props) => (props.visible ? 1 : 0)};
+  pointer-events: ${(props) => (props.visible ? "auto" : "none")};
+
+  &:hover {
+    background: rgba(26, 26, 46, 1);
+    border-color: #6366f1;
+    transform: translateY(-50%) scale(1.05);
+  }
+`;
+
+const ControlButtons = styled.div`
+  position: fixed;
+  right: 20px;
+  top: 20px;
+  z-index: 1000;
+  display: flex;
+  gap: 12px;
+`;
+
+const ControlButton = styled.button<{ variant: "pause" | "resume" }>`
+  background: rgba(26, 26, 46, 0.9);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  padding: 12px 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f9fafb;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  min-width: 80px;
+
+  background-color: ${(props) =>
+    props.variant === "pause"
+      ? "rgba(239, 68, 68, 0.2)"
+      : "rgba(34, 197, 94, 0.2)"};
+  border-color: ${(props) =>
+    props.variant === "pause"
+      ? "rgba(239, 68, 68, 0.5)"
+      : "rgba(34, 197, 94, 0.5)"};
+
+  &:hover {
+    background-color: ${(props) =>
+      props.variant === "pause"
+        ? "rgba(239, 68, 68, 0.3)"
+        : "rgba(34, 197, 94, 0.3)"};
+    border-color: ${(props) =>
+      props.variant === "pause"
+        ? "rgba(239, 68, 68, 0.8)"
+        : "rgba(34, 197, 94, 0.8)"};
+    transform: scale(1.05);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+  }
+`;
+
 function App() {
-  const [currentImage, setCurrentImage] = useState<string | null>(
-    "https://picsum.photos/512/512"
-  );
-  const [isGenerating, setIsGenerating] = useState(false);
+  // Zustand store에서 상태 가져오기
+  const {
+    currentSession,
+    selectedStepIndex,
+    isGenerating,
+    isPaused,
+    startGeneration,
+    selectStep,
+    pauseGeneration,
+    resumeGeneration,
+  } = useImageStore();
+
+  // 현재 표시할 이미지와 진행률 계산
+  const currentImage = (() => {
+    if (!currentSession?.steps || currentSession.steps.length === 0)
+      return null;
+
+    // 선택된 스텝이 유효한 범위 내에 있는지 확인
+    const maxIndex = currentSession.steps.length - 1;
+    let targetIndex: number;
+
+    if (
+      selectedStepIndex !== null &&
+      selectedStepIndex >= 0 &&
+      selectedStepIndex <= maxIndex
+    ) {
+      // 사용자가 특정 스텝을 선택한 경우
+      targetIndex = selectedStepIndex;
+    } else {
+      // 선택된 스텝이 없거나 유효하지 않은 경우 최신 스텝으로
+      targetIndex = maxIndex;
+    }
+
+    console.log("이미지 선택 로직:", {
+      selectedStepIndex,
+      maxIndex,
+      targetIndex,
+      totalSteps: currentSession.steps.length,
+      targetUrl: currentSession.steps[targetIndex]?.url,
+      isValidSelection:
+        selectedStepIndex !== null &&
+        selectedStepIndex >= 0 &&
+        selectedStepIndex <= maxIndex,
+    });
+
+    return currentSession.steps[targetIndex]?.url || null;
+  })();
+
+  const progress =
+    currentSession && currentSession.steps
+      ? (currentSession.steps.length / currentSession.totalSteps) * 100
+      : 0;
+
+  // 로컬 상태 (UI 관련)
   const [toolMode, setToolMode] = useState<ToolMode>("none");
   const [tooltipVisible, setTooltipVisible] = useState(false);
   const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
@@ -145,16 +303,9 @@ function App() {
 
   const imageRef = useRef<HTMLImageElement>(null);
 
-  const handleSendPrompt = (newPrompt: string) => {
-    console.log("프롬프트 전송:", newPrompt);
-    setIsGenerating(true);
-
-    // 실제로는 서버로 프롬프트를 전송하고 이미지 스트림을 받아옴
-    // 여기서는 데모용으로 doridori.png를 사용 (이미지 스트림의 시작점)
-    setTimeout(() => {
-      setCurrentImage(doridoriImage);
-      setIsGenerating(false);
-    }, 2000);
+  const handleSendPrompt = (newPrompt: string, interval: number) => {
+    console.log("프롬프트 전송:", newPrompt, "간격:", interval);
+    startGeneration(newPrompt, interval);
   };
 
   const handleInteraction = (data: InteractionData) => {
@@ -302,6 +453,33 @@ function App() {
             )}
           </GlobalFeedbackContainer>
         )}
+
+        {/* 이미지 생성 진행률 표시 */}
+        {currentSession && (
+          <ProgressContainer>
+            <ProgressBar>
+              <ProgressFill progress={progress} />
+            </ProgressBar>
+            <ProgressText>
+              {isPaused ? (
+                <>
+                  일시정지됨 - {currentSession.steps.length}/
+                  {currentSession.totalSteps} 스텝
+                </>
+              ) : isGenerating ? (
+                <>
+                  이미지 생성 중... {currentSession.steps.length}/
+                  {currentSession.totalSteps} 스텝
+                </>
+              ) : (
+                <>
+                  완료됨 - {currentSession.steps.length}/
+                  {currentSession.totalSteps} 스텝
+                </>
+              )}
+            </ProgressText>
+          </ProgressContainer>
+        )}
       </ImageContainer>
 
       <FeedbackTooltip
@@ -312,6 +490,41 @@ function App() {
         onClose={handleTooltipClose}
         onSubmit={handleFeedbackSubmit}
       />
+
+      <ImageHistoryNavigator />
+
+      {/* 최신 이미지로 가기 버튼 */}
+      <LatestImageButton
+        visible={
+          !!(
+            selectedStepIndex !== null &&
+            currentSession?.steps &&
+            currentSession.steps.length > 0
+          )
+        }
+        onClick={() => selectStep(null)}
+      >
+        최신 이미지
+      </LatestImageButton>
+
+      {/* 생성 제어 버튼들 */}
+      {currentSession && !currentSession.isComplete && (
+        <ControlButtons>
+          {!isPaused ? (
+            <ControlButton
+              variant="pause"
+              onClick={pauseGeneration}
+              disabled={!isGenerating}
+            >
+              일시정지
+            </ControlButton>
+          ) : (
+            <ControlButton variant="resume" onClick={resumeGeneration}>
+              계속하기
+            </ControlButton>
+          )}
+        </ControlButtons>
+      )}
     </AppContainer>
   );
 }

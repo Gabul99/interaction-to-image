@@ -35,6 +35,42 @@ const PromptInput = styled.input`
   }
 `;
 
+const IntervalSelector = styled.div`
+  margin-top: 12px;
+`;
+
+const IntervalLabel = styled.label`
+  display: block;
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 8px;
+  font-weight: 500;
+`;
+
+const IntervalOptions = styled.div`
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+`;
+
+const IntervalOption = styled.button<{ selected: boolean }>`
+  padding: 8px 12px;
+  border: 2px solid ${(props) => (props.selected ? "#6366f1" : "#374151")};
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  background: ${(props) =>
+    props.selected ? "rgba(99, 102, 241, 0.2)" : "rgba(55, 65, 81, 0.5)"};
+  color: ${(props) => (props.selected ? "#6366f1" : "#f9fafb")};
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover {
+    border-color: #6366f1;
+    background: rgba(99, 102, 241, 0.1);
+  }
+`;
+
 const SendButton = styled.button`
   margin-top: 12px;
   width: 100%;
@@ -65,20 +101,28 @@ const SendButton = styled.button`
 `;
 
 interface PromptInputProps {
-  onSendPrompt: (prompt: string) => void;
+  onSendPrompt: (prompt: string, interval: number) => void;
   disabled?: boolean;
 }
+
+const INTERVAL_OPTIONS = [
+  { value: 1, label: "1" },
+  { value: 5, label: "5" },
+  { value: 10, label: "10" },
+  { value: 20, label: "20" },
+];
 
 const PromptInputComponent: React.FC<PromptInputProps> = ({
   onSendPrompt,
   disabled = false,
 }) => {
   const [prompt, setPrompt] = useState("");
+  const [selectedInterval, setSelectedInterval] = useState(1);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (prompt.trim() && !disabled) {
-      onSendPrompt(prompt.trim());
+      onSendPrompt(prompt.trim(), selectedInterval);
       setPrompt("");
     }
   };
@@ -93,6 +137,23 @@ const PromptInputComponent: React.FC<PromptInputProps> = ({
           onChange={(e) => setPrompt(e.target.value)}
           disabled={disabled}
         />
+
+        <IntervalSelector>
+          <IntervalLabel>생성 간격 (스텝 단위)</IntervalLabel>
+          <IntervalOptions>
+            {INTERVAL_OPTIONS.map((option) => (
+              <IntervalOption
+                key={option.value}
+                selected={selectedInterval === option.value}
+                onClick={() => setSelectedInterval(option.value)}
+                disabled={disabled}
+              >
+                {option.label}
+              </IntervalOption>
+            ))}
+          </IntervalOptions>
+        </IntervalSelector>
+
         <SendButton type="submit" disabled={disabled || !prompt.trim()}>
           이미지 생성 시작
         </SendButton>

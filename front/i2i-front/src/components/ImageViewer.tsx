@@ -86,6 +86,7 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
   onImageLoad,
   imageRef,
 }) => {
+  console.log("imageUrl", imageUrl);
   return (
     <ImageViewerContainer>
       <ImageWrapper>
