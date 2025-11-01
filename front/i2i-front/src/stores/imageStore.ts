@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { type FeedbackArea } from "../types";
 
 export interface ImageStep {
   id: string; // 서버에서 보내준 UUID
@@ -33,6 +34,12 @@ export interface ImageStreamState {
   // 이미지 생성 간격 설정
   generationInterval: number; // 1, 5, 10, 20 스텝 단위
 
+  // 피드백 요청 상태
+  feedbackRequest: {
+    visible: boolean;
+    area: FeedbackArea;
+  } | null;
+
   // Actions
   startGeneration: (prompt: string, interval?: number) => void;
   setGenerationInterval: (interval: number) => void;
@@ -42,6 +49,10 @@ export interface ImageStreamState {
   pauseGeneration: () => void; // 생성 일시정지
   resumeGeneration: () => void; // 생성 재개
   selectStep: (stepIndex: number | null) => void; // 특정 스텝 선택 또는 최신으로 돌아가기
+
+  // 피드백 관련 액션
+  showFeedbackRequest: (area: FeedbackArea) => void;
+  hideFeedbackRequest: () => void;
 
   // Socket 시뮬레이션
   simulateImageStream: (
@@ -59,6 +70,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   isPaused: false,
   isConnected: false,
   generationInterval: 1, // 기본값: 매 스텝마다
+  feedbackRequest: null,
 
   // 이미지 생성 시작
   startGeneration: (prompt: string, interval?: number) => {
@@ -173,6 +185,37 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     set({ selectedStepIndex: stepIndex });
   },
 
+  // 피드백 요청 표시
+  showFeedbackRequest: (area: FeedbackArea) => {
+    set({
+      feedbackRequest: {
+        visible: true,
+        area,
+      },
+    });
+  },
+
+  // 피드백 요청 숨기기
+  hideFeedbackRequest: () => {
+    const state = get();
+    set({ feedbackRequest: null });
+
+    // 피드백이 닫히면 생성이 계속되도록 시뮬레이션 재시작
+    if (
+      state.currentSession &&
+      !state.currentSession.isComplete &&
+      state.isGenerating
+    ) {
+      console.log("피드백 처리 완료, 생성 재개");
+      // 시뮬레이션 재시작 (현재 세션과 간격 유지)
+      get().simulateImageStream(
+        state.currentSession.id,
+        state.currentSession.prompt,
+        state.generationInterval
+      );
+    }
+  },
+
   // Socket 시뮬레이션 (실제 서버 대신)
   simulateImageStream: (
     sessionId: string,
@@ -212,6 +255,12 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         return;
       }
 
+      // 피드백 요청이 있는 경우 일시정지
+      if (currentState.feedbackRequest?.visible) {
+        console.log("피드백 요청 대기 중... 생성 일시정지");
+        return; // 피드백이 처리될 때까지 대기
+      }
+
       // 간격에 따라 스텝 증가
       currentStep += selectedInterval;
 
@@ -229,6 +278,26 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         `이미지 스텝 추가: ${currentStep}/${totalSteps} (간격: ${selectedInterval})`
       );
       get().addImageStep(sessionId, imageStep);
+
+      // 특정 스텝에서 피드백 요청 트리거
+      if (currentStep === 5) {
+        console.log("스텝 5에서 피드백 요청 트리거");
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        get().showFeedbackRequest("full");
+        return;
+      } else if (currentStep === 10) {
+        console.log("스텝 10에서 피드백 요청 트리거");
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        // 스텝 10에서는 포인팅 피드백 요청으로 시뮬레이션
+        get().showFeedbackRequest("point");
+        return;
+      }
 
       // 완료되면 인터벌 정리
       if (currentStep >= totalSteps) {

@@ -42,19 +42,6 @@ const PlaceholderImage = styled.div`
   border: 2px solid #374151;
 `;
 
-const LoadingOverlay = styled.div`
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(26, 26, 46, 0.8);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 12px;
-`;
-
 const LoadingSpinner = styled.div`
   width: 40px;
   height: 40px;
@@ -87,14 +74,13 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
   imageRef,
 }) => {
   console.log("imageUrl", imageUrl);
+
+  // 이미지 URL이 있으면 항상 이미지를 표시 (중간 과정을 보여주기 위해)
+  // 각 스텝 이미지가 도착하면 즉시 표시되어야 함
   return (
     <ImageViewerContainer>
       <ImageWrapper>
-        {isLoading ? (
-          <LoadingOverlay>
-            <LoadingSpinner />
-          </LoadingOverlay>
-        ) : imageUrl ? (
+        {imageUrl ? (
           <Image
             ref={imageRef}
             src={imageUrl}
@@ -103,7 +89,14 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
           />
         ) : (
           <PlaceholderImage>
-            프롬프트를 입력하고 이미지 생성을 시작하세요
+            {isLoading ? (
+              <>
+                <LoadingSpinner />
+                <div style={{ marginTop: "16px" }}>이미지 생성 중...</div>
+              </>
+            ) : (
+              "프롬프트를 입력하고 이미지 생성을 시작하세요"
+            )}
           </PlaceholderImage>
         )}
       </ImageWrapper>

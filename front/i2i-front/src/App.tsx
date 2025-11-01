@@ -1,15 +1,17 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import styled from "styled-components";
 import PromptInput from "./components/PromptInput";
 import ImageViewer from "./components/ImageViewer";
 import InteractionCanvas from "./components/InteractionCanvas";
-import FeedbackTooltip, {
-  type FeedbackData,
-} from "./components/FeedbackTooltip";
-import Toolbar from "./components/Toolbar";
 import ImageHistoryNavigator from "./components/ImageHistoryNavigator";
-import { type ToolMode, type InteractionData } from "./types";
+import FeedbackPanel from "./components/FeedbackPanel";
 import { useImageStore } from "./stores/imageStore";
+import { sendFeedbackToServer, skipFeedback } from "./api/feedback";
+import {
+  type FeedbackData,
+  type ToolMode,
+  type InteractionData,
+} from "./types";
 
 const AppContainer = styled.div`
   height: 100vh;
@@ -21,114 +23,15 @@ const AppContainer = styled.div`
   padding: 0;
 `;
 
-const ImageContainer = styled.div`
+const ImageContainer = styled.div<{ hasFeedbackPanel: boolean }>`
   position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   padding-top: 60px;
   min-height: 60vh;
-  width: 100%;
-`;
-
-const GlobalFeedbackContainer = styled.div`
-  margin-top: 20px;
-  width: 100%;
-  max-width: 512px; /* 이미지 최대 크기에 맞춤 */
-  background: rgba(26, 26, 46, 0.9);
-  backdrop-filter: blur(10px);
-  border-radius: 12px;
-  padding: 16px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-`;
-
-const GlobalFeedbackToggleButton = styled.button`
-  width: 100%;
-  padding: 12px 16px;
-  background: rgba(55, 65, 81, 0.5);
-  color: #f9fafb;
-  border: 2px solid #374151;
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s ease;
-
-  &:hover {
-    background: rgba(55, 65, 81, 0.7);
-    border-color: #6366f1;
-  }
-`;
-
-const GlobalFeedbackInputContainer = styled.div`
-  display: flex;
-  gap: 12px;
-  align-items: flex-end;
-`;
-
-const GlobalFeedbackCancelButton = styled.button`
-  padding: 12px 16px;
-  background: transparent;
-  color: #9ca3af;
-  border: 2px solid #374151;
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  white-space: nowrap;
-
-  &:hover {
-    background: rgba(55, 65, 81, 0.3);
-    border-color: #6b7280;
-    color: #d1d5db;
-  }
-`;
-
-const GlobalFeedbackInput = styled.textarea`
-  flex: 1;
-  min-height: 50px;
-  max-height: 120px;
-  padding: 12px 16px;
-  border: 2px solid #374151;
-  border-radius: 8px;
-  font-size: 14px;
-  background: rgba(55, 65, 81, 0.5);
-  color: #f9fafb;
-  resize: vertical;
-  outline: none;
-  transition: border-color 0.2s ease;
-
-  &:focus {
-    border-color: #6366f1;
-  }
-
-  &::placeholder {
-    color: #9ca3af;
-  }
-`;
-
-const GlobalSendButton = styled.button`
-  padding: 12px 20px;
-  background: #6366f1;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  white-space: nowrap;
-
-  &:hover {
-    background: #5b5bd6;
-  }
-
-  &:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
+  width: ${(props) => (props.hasFeedbackPanel ? "calc(100% - 400px)" : "100%")};
+  transition: width 0.3s ease;
 `;
 
 const ProgressContainer = styled.div`
@@ -187,69 +90,31 @@ const LatestImageButton = styled.button<{ visible: boolean }>`
   }
 `;
 
-const ControlButtons = styled.div`
-  position: fixed;
-  right: 20px;
-  top: 20px;
-  z-index: 1000;
-  display: flex;
-  gap: 12px;
-`;
-
-const ControlButton = styled.button<{ variant: "pause" | "resume" }>`
-  background: rgba(26, 26, 46, 0.9);
-  backdrop-filter: blur(10px);
-  border-radius: 12px;
-  padding: 12px 16px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #f9fafb;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  min-width: 80px;
-
-  background-color: ${(props) =>
-    props.variant === "pause"
-      ? "rgba(239, 68, 68, 0.2)"
-      : "rgba(34, 197, 94, 0.2)"};
-  border-color: ${(props) =>
-    props.variant === "pause"
-      ? "rgba(239, 68, 68, 0.5)"
-      : "rgba(34, 197, 94, 0.5)"};
-
-  &:hover {
-    background-color: ${(props) =>
-      props.variant === "pause"
-        ? "rgba(239, 68, 68, 0.3)"
-        : "rgba(34, 197, 94, 0.3)"};
-    border-color: ${(props) =>
-      props.variant === "pause"
-        ? "rgba(239, 68, 68, 0.8)"
-        : "rgba(34, 197, 94, 0.8)"};
-    transform: scale(1.05);
-  }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    transform: none;
-  }
-`;
-
 function App() {
   // Zustand store에서 상태 가져오기
   const {
     currentSession,
     selectedStepIndex,
     isGenerating,
-    isPaused,
     startGeneration,
     selectStep,
-    pauseGeneration,
-    resumeGeneration,
+    feedbackRequest,
+    hideFeedbackRequest,
   } = useImageStore();
+
+  // 피드백 패널 관련 상태
+  const [toolMode, setToolMode] = useState<ToolMode>("none");
+  const [selectedPoint, setSelectedPoint] = useState<
+    { x: number; y: number } | undefined
+  >();
+  const [selectedBbox, setSelectedBbox] = useState<
+    { x: number; y: number; width: number; height: number } | undefined
+  >();
+
+  // selectedBbox 변경 시 디버깅
+  useEffect(() => {
+    console.log("App - selectedBbox 상태 변경:", selectedBbox);
+  }, [selectedBbox]);
 
   // 현재 표시할 이미지와 진행률 계산
   const currentImage = (() => {
@@ -292,166 +157,123 @@ function App() {
       ? (currentSession.steps.length / currentSession.totalSteps) * 100
       : 0;
 
-  // 로컬 상태 (UI 관련)
-  const [toolMode, setToolMode] = useState<ToolMode>("none");
-  const [tooltipVisible, setTooltipVisible] = useState(false);
-  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
-  const [lastInteraction, setLastInteraction] =
-    useState<InteractionData | null>(null);
-  const [globalFeedback, setGlobalFeedback] = useState("");
-  const [showGlobalFeedback, setShowGlobalFeedback] = useState(false);
-
   const imageRef = useRef<HTMLImageElement>(null);
 
-  const handleSendPrompt = (newPrompt: string, interval: number) => {
-    console.log("프롬프트 전송:", newPrompt, "간격:", interval);
-    startGeneration(newPrompt, interval);
+  // 피드백 요청이 변경되면 선택 초기화
+  useEffect(() => {
+    if (!feedbackRequest?.visible) {
+      setToolMode("none");
+      setSelectedPoint(undefined);
+      setSelectedBbox(undefined);
+    }
+  }, [feedbackRequest?.visible]);
+
+  const handleSendPrompt = (newPrompt: string) => {
+    console.log("프롬프트 전송:", newPrompt);
+    startGeneration(newPrompt);
   };
 
-  const handleInteraction = (data: InteractionData) => {
-    console.log("handleInteraction 호출됨:", data);
-    setLastInteraction(data);
+  // 영역 선택에 따라 도구 모드 변경
+  const handleAreaSelect = (area: string) => {
+    console.log("handleAreaSelect 호출:", area, "현재 toolMode:", toolMode);
 
-    // 툴팁 위치 계산 (이미지 기준)
-    if (imageRef.current) {
-      const rect = imageRef.current.getBoundingClientRect();
-
-      if (data.type === "point") {
-        // 포인트의 경우 클릭한 위치 위에 표시
-        const x = rect.left + data.x * rect.width;
-        const y = rect.top + data.y * rect.height - 10; // 포인트 위쪽에 10px 여백
-        console.log("포인트 툴팁 위치:", { x, y });
-        setTooltipPosition({ x, y });
-      } else if (data.type === "bbox" && data.width && data.height) {
-        // 바운딩 박스의 경우 오른쪽에 표시
-        // data.x, data.y는 이미지 내에서의 상대 좌표 (0~1)
-        // data.width, data.height는 상대 크기 (0~1)
-        const boxRightX = data.x + data.width; // 박스의 오른쪽 끝 (상대 좌표)
-        const rightX = rect.left + boxRightX * rect.width + 15; // 박스 오른쪽 + 15px 여백
-        const centerY = rect.top + (data.y + data.height / 2) * rect.height;
-        console.log("바운딩 박스 툴팁 위치:", {
-          boxRightX,
-          rightX,
-          centerY,
-          rect: {
-            left: rect.left,
-            width: rect.width,
-            top: rect.top,
-            height: rect.height,
-          },
-        });
-        setTooltipPosition({ x: rightX, y: centerY });
+    if (area === "full") {
+      setToolMode("none");
+      setSelectedPoint(undefined);
+      setSelectedBbox(undefined);
+    } else if (area === "point") {
+      // 포인팅 모드로 변경할 때만 도구 모드 변경
+      // 이미 선택된 포인트가 있으면 유지
+      if (toolMode !== "point") {
+        setToolMode("point");
+        setSelectedPoint(undefined); // 모드 변경 시에만 초기화
+        setSelectedBbox(undefined);
       }
-
-      console.log("툴팁 표시 설정");
-      setTooltipVisible(true);
+      // 이미 point 모드면 선택 상태 유지
+    } else if (area === "bbox") {
+      // BBOX 모드로 변경할 때만 도구 모드 변경
+      // 이미 선택된 BBOX가 있으면 유지
+      if (toolMode !== "bbox") {
+        setToolMode("bbox");
+        setSelectedPoint(undefined);
+        setSelectedBbox(undefined); // 모드 변경 시에만 초기화
+      }
+      // 이미 bbox 모드면 선택 상태 유지
     }
   };
 
-  const handleFeedbackSubmit = (feedback: FeedbackData) => {
-    console.log("피드백 제출:", {
-      interaction: lastInteraction,
-      feedback,
-    });
-
-    // 실제로는 서버로 피드백을 전송
-    setTooltipVisible(false);
-    setLastInteraction(null);
-  };
-
-  const handleTooltipClose = () => {
-    setTooltipVisible(false);
-    setLastInteraction(null);
-    // 툴팁을 닫을 때만 모드를 none으로 변경
-    setToolMode("none");
-  };
-
-  const handleGlobalFeedbackSubmit = () => {
-    if (globalFeedback.trim()) {
-      console.log("전체 피드백 제출:", {
-        type: "global",
-        content: globalFeedback.trim(),
-        imageUrl: currentImage,
-      });
-
-      // 실제로는 서버로 전체 피드백을 전송
-      setGlobalFeedback("");
-      setShowGlobalFeedback(false); // 전송 후 입력창 닫기
+  // InteractionCanvas에서 상호작용 발생 시
+  const handleInteraction = (data: InteractionData) => {
+    console.log("handleInteraction 호출:", data);
+    if (data.type === "point") {
+      const point = { x: data.x, y: data.y };
+      console.log("포인트 선택:", point);
+      setSelectedPoint(point);
+    } else if (data.type === "bbox" && data.width && data.height) {
+      const bbox = {
+        x: data.x,
+        y: data.y,
+        width: data.width,
+        height: data.height,
+      };
+      console.log("BBOX 선택:", bbox);
+      setSelectedBbox(bbox);
+    } else {
+      console.warn("BBOX 데이터가 불완전:", data);
     }
   };
 
-  const handleGlobalFeedbackKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-      handleGlobalFeedbackSubmit();
+  const handleFeedbackSubmit = async (feedback: FeedbackData) => {
+    try {
+      await sendFeedbackToServer(feedback);
+      console.log("피드백 전송 성공");
+      hideFeedbackRequest();
+    } catch (error) {
+      console.error("피드백 전송 실패:", error);
+      // 에러 처리 (예: 토스트 메시지 표시)
     }
   };
+
+  const handleFeedbackSkip = async () => {
+    try {
+      await skipFeedback();
+      console.log("피드백 건너뛰기 성공");
+      hideFeedbackRequest();
+    } catch (error) {
+      console.error("피드백 건너뛰기 실패:", error);
+      // 에러 처리 (예: 토스트 메시지 표시)
+    }
+  };
+
+  // 피드백 패널이 열려있을 때만 InteractionCanvas 활성화
+  const isFeedbackPanelOpen = feedbackRequest?.visible ?? false;
 
   return (
     <AppContainer>
       <PromptInput onSendPrompt={handleSendPrompt} disabled={isGenerating} />
 
-      <Toolbar
-        toolMode={toolMode}
-        onToolChange={setToolMode}
-        disabled={!currentImage || isGenerating}
-      />
-
-      <ImageContainer>
+      <ImageContainer hasFeedbackPanel={isFeedbackPanelOpen}>
         <ImageViewer
           imageUrl={currentImage || undefined}
-          isLoading={isGenerating}
           onImageLoad={() => console.log("이미지 로드 완료")}
           imageRef={imageRef}
         />
 
-        {currentImage && (
+        {/* 피드백 패널이 열려있을 때만 InteractionCanvas 활성화 */}
+        {currentImage && isFeedbackPanelOpen && (
           <InteractionCanvas
             toolMode={toolMode}
-            disabled={isGenerating}
+            disabled={false}
             onInteraction={handleInteraction}
             onClearSelection={() => {
-              // 외부 클릭 시에는 툴팁만 닫고 모드는 유지
-              setTooltipVisible(false);
-              setLastInteraction(null);
+              if (toolMode === "point") {
+                setSelectedPoint(undefined);
+              } else if (toolMode === "bbox") {
+                setSelectedBbox(undefined);
+              }
             }}
             imageRef={imageRef}
           />
-        )}
-
-        {currentImage && (
-          <GlobalFeedbackContainer>
-            {!showGlobalFeedback ? (
-              <GlobalFeedbackToggleButton
-                onClick={() => setShowGlobalFeedback(true)}
-              >
-                전체 피드백 작성하기
-              </GlobalFeedbackToggleButton>
-            ) : (
-              <GlobalFeedbackInputContainer>
-                <GlobalFeedbackInput
-                  value={globalFeedback}
-                  onChange={(e) => setGlobalFeedback(e.target.value)}
-                  onKeyDown={handleGlobalFeedbackKeyDown}
-                  placeholder="이미지 전체에 대한 피드백을 입력하세요"
-                  autoFocus
-                />
-                <GlobalSendButton
-                  onClick={handleGlobalFeedbackSubmit}
-                  disabled={!globalFeedback.trim() || isGenerating}
-                >
-                  전송
-                </GlobalSendButton>
-                <GlobalFeedbackCancelButton
-                  onClick={() => {
-                    setShowGlobalFeedback(false);
-                    setGlobalFeedback("");
-                  }}
-                >
-                  취소
-                </GlobalFeedbackCancelButton>
-              </GlobalFeedbackInputContainer>
-            )}
-          </GlobalFeedbackContainer>
         )}
 
         {/* 이미지 생성 진행률 표시 */}
@@ -461,12 +283,7 @@ function App() {
               <ProgressFill progress={progress} />
             </ProgressBar>
             <ProgressText>
-              {isPaused ? (
-                <>
-                  일시정지됨 - {currentSession.steps.length}/
-                  {currentSession.totalSteps} 스텝
-                </>
-              ) : isGenerating ? (
+              {isGenerating ? (
                 <>
                   이미지 생성 중... {currentSession.steps.length}/
                   {currentSession.totalSteps} 스텝
@@ -482,15 +299,6 @@ function App() {
         )}
       </ImageContainer>
 
-      <FeedbackTooltip
-        x={tooltipPosition.x}
-        y={tooltipPosition.y}
-        visible={tooltipVisible}
-        type={lastInteraction?.type}
-        onClose={handleTooltipClose}
-        onSubmit={handleFeedbackSubmit}
-      />
-
       <ImageHistoryNavigator />
 
       {/* 최신 이미지로 가기 버튼 */}
@@ -499,7 +307,8 @@ function App() {
           !!(
             selectedStepIndex !== null &&
             currentSession?.steps &&
-            currentSession.steps.length > 0
+            currentSession.steps.length > 0 &&
+            !isFeedbackPanelOpen
           )
         }
         onClick={() => selectStep(null)}
@@ -507,23 +316,17 @@ function App() {
         최신 이미지
       </LatestImageButton>
 
-      {/* 생성 제어 버튼들 */}
-      {currentSession && !currentSession.isComplete && (
-        <ControlButtons>
-          {!isPaused ? (
-            <ControlButton
-              variant="pause"
-              onClick={pauseGeneration}
-              disabled={!isGenerating}
-            >
-              일시정지
-            </ControlButton>
-          ) : (
-            <ControlButton variant="resume" onClick={resumeGeneration}>
-              계속하기
-            </ControlButton>
-          )}
-        </ControlButtons>
+      {/* 피드백 패널 */}
+      {feedbackRequest && (
+        <FeedbackPanel
+          visible={feedbackRequest.visible}
+          onSubmit={handleFeedbackSubmit}
+          onSkip={handleFeedbackSkip}
+          area={feedbackRequest.area}
+          selectedPoint={selectedPoint}
+          selectedBbox={selectedBbox}
+          onAreaSelect={handleAreaSelect}
+        />
       )}
     </AppContainer>
   );

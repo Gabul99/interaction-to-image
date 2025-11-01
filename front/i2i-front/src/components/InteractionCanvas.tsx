@@ -2,12 +2,19 @@ import React, { useRef, useEffect, useState, useCallback } from "react";
 import styled from "styled-components";
 import { type ToolMode, type InteractionData } from "../types";
 
-const CanvasContainer = styled.div<{ disabled?: boolean; toolMode: ToolMode }>`
+const CanvasContainer = styled.div<{
+  disabled?: boolean;
+  toolMode: ToolMode;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}>`
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  left: ${(props) => props.left}px;
+  top: ${(props) => props.top}px;
+  width: ${(props) => props.width}px;
+  height: ${(props) => props.height}px;
   pointer-events: ${(props) => (props.disabled ? "none" : "auto")};
   cursor: ${(props) => {
     switch (props.toolMode) {
@@ -45,47 +52,79 @@ const InteractionCanvas: React.FC<InteractionCanvasProps> = ({
   imageRef,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(
     null
   );
+  const [canvasPosition, setCanvasPosition] = useState({
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+  });
+
+  // 이미지 위치와 크기에 맞춰 Canvas 위치 업데이트
+  useEffect(() => {
+    const updateCanvasPosition = () => {
+      if (!imageRef?.current || !containerRef.current) return;
+
+      const img = imageRef.current;
+      const imgRect = img.getBoundingClientRect();
+
+      // 부모 컨테이너 찾기 (ImageContainer)
+      const parentContainer = containerRef.current.parentElement;
+      if (!parentContainer) return;
+
+      const containerRect = parentContainer.getBoundingClientRect();
+
+      // 컨테이너 기준 이미지 위치
+      const left = imgRect.left - containerRect.left;
+      const top = imgRect.top - containerRect.top;
+
+      setCanvasPosition({
+        left,
+        top,
+        width: imgRect.width,
+        height: imgRect.height,
+      });
+
+      // Canvas 크기도 업데이트
+      if (canvasRef.current) {
+        canvasRef.current.width = imgRect.width;
+        canvasRef.current.height = imgRect.height;
+      }
+    };
+
+    updateCanvasPosition();
+
+    // 이미지 로드 시 업데이트
+    const img = imageRef?.current;
+    if (img) {
+      img.addEventListener("load", updateCanvasPosition);
+    }
+
+    // 윈도우 리사이즈 시 업데이트
+    window.addEventListener("resize", updateCanvasPosition);
+
+    return () => {
+      if (img) {
+        img.removeEventListener("load", updateCanvasPosition);
+      }
+      window.removeEventListener("resize", updateCanvasPosition);
+    };
+  }, [imageRef]);
 
   const getImageBounds = useCallback(() => {
     if (!imageRef?.current || !canvasRef.current) return null;
 
-    const img = imageRef.current;
-    const canvas = canvasRef.current;
-
-    // 이미지의 실제 크기와 표시 크기
-    const imgRect = img.getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
-
-    // 캔버스 내에서 이미지의 상대적 위치 계산
-    const imageLeft = imgRect.left - canvasRect.left;
-    const imageTop = imgRect.top - canvasRect.top;
-
-    console.log("이미지 바운드 계산:", {
-      imgRect: {
-        left: imgRect.left,
-        top: imgRect.top,
-        width: imgRect.width,
-        height: imgRect.height,
-      },
-      canvasRect: {
-        left: canvasRect.left,
-        top: canvasRect.top,
-        width: canvasRect.width,
-        height: canvasRect.height,
-      },
-      imageLeft,
-      imageTop,
-    });
-
+    // Canvas가 이미 이미지와 정확히 같은 크기와 위치이므로
+    // 이미지 내에서의 상대 위치는 단순히 Canvas 내 위치를 이미지 크기로 나눈 값
     return {
-      left: imageLeft,
-      top: imageTop,
-      width: imgRect.width,
-      height: imgRect.height,
+      left: 0,
+      top: 0,
+      width: canvasRef.current.width,
+      height: canvasRef.current.height,
     };
   }, [imageRef]);
 
@@ -100,27 +139,17 @@ const InteractionCanvas: React.FC<InteractionCanvasProps> = ({
       const canvasX = clientX - canvasRect.left;
       const canvasY = clientY - canvasRect.top;
 
-      console.log("마우스 위치 계산:", {
-        clientX,
-        clientY,
-        canvasRect: { left: canvasRect.left, top: canvasRect.top },
-        canvasX,
-        canvasY,
-        bounds,
-      });
-
-      // 이미지 영역 내부인지 확인
+      // Canvas가 이미지와 정확히 같은 크기이므로
+      // Canvas 내 위치가 이미지 내 위치와 같음
       if (
-        canvasX >= bounds.left &&
-        canvasX <= bounds.left + bounds.width &&
-        canvasY >= bounds.top &&
-        canvasY <= bounds.top + bounds.height
+        canvasX >= 0 &&
+        canvasX <= bounds.width &&
+        canvasY >= 0 &&
+        canvasY <= bounds.height
       ) {
         // 이미지 내에서의 상대적 위치 (0~1)
-        const relativeX = (canvasX - bounds.left) / bounds.width;
-        const relativeY = (canvasY - bounds.top) / bounds.height;
-
-        console.log("상대 위치:", { relativeX, relativeY });
+        const relativeX = canvasX / bounds.width;
+        const relativeY = canvasY / bounds.height;
 
         return {
           x: relativeX,
@@ -128,42 +157,35 @@ const InteractionCanvas: React.FC<InteractionCanvasProps> = ({
         };
       }
 
-      console.log("이미지 영역 외부 클릭");
       return null;
     },
     [getImageBounds]
   );
 
-  const drawPoint = useCallback(
-    (x: number, y: number) => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
+  const drawPoint = useCallback((x: number, y: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
 
-      const bounds = getImageBounds();
-      if (!bounds) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // 상대 좌표(0~1)를 캔버스 픽셀 좌표로 변환
+    const canvasX = x * canvas.width;
+    const canvasY = y * canvas.height;
 
-      // 상대 좌표(0~1)를 캔버스 좌표로 변환
-      const canvasX = bounds.left + x * bounds.width;
-      const canvasY = bounds.top + y * bounds.height;
+    // 포인트 그리기
+    ctx.fillStyle = "#6366f1";
+    ctx.beginPath();
+    ctx.arc(canvasX, canvasY, 6, 0, 2 * Math.PI);
+    ctx.fill();
 
-      // 포인트 그리기
-      ctx.fillStyle = "#6366f1";
-      ctx.beginPath();
-      ctx.arc(canvasX, canvasY, 6, 0, 2 * Math.PI);
-      ctx.fill();
-
-      // 외곽선
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    },
-    [getImageBounds]
-  );
+    // 외곽선
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }, []);
 
   const drawBoundingBox = useCallback(
     (startX: number, startY: number, endX: number, endY: number) => {
@@ -173,16 +195,13 @@ const InteractionCanvas: React.FC<InteractionCanvasProps> = ({
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
-      const bounds = getImageBounds();
-      if (!bounds) return;
-
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // 상대 좌표(0~1)를 캔버스 좌표로 변환
-      const canvasStartX = bounds.left + startX * bounds.width;
-      const canvasStartY = bounds.top + startY * bounds.height;
-      const canvasEndX = bounds.left + endX * bounds.width;
-      const canvasEndY = bounds.top + endY * bounds.height;
+      // 상대 좌표(0~1)를 캔버스 픽셀 좌표로 변환
+      const canvasStartX = startX * canvas.width;
+      const canvasStartY = startY * canvas.height;
+      const canvasEndX = endX * canvas.width;
+      const canvasEndY = endY * canvas.height;
 
       const x = Math.min(canvasStartX, canvasEndX);
       const y = Math.min(canvasStartY, canvasEndY);
@@ -199,7 +218,7 @@ const InteractionCanvas: React.FC<InteractionCanvasProps> = ({
       ctx.fillStyle = "rgba(99, 102, 241, 0.1)";
       ctx.fillRect(x, y, width, height);
     },
-    [getImageBounds]
+    []
   );
 
   const handleMouseDown = useCallback(
@@ -300,26 +319,6 @@ const InteractionCanvas: React.FC<InteractionCanvasProps> = ({
   }, []);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const resizeCanvas = () => {
-      const container = canvas.parentElement;
-      if (!container) return;
-
-      canvas.width = container.offsetWidth;
-      canvas.height = container.offsetHeight;
-    };
-
-    resizeCanvas();
-    window.addEventListener("resize", resizeCanvas);
-
-    return () => {
-      window.removeEventListener("resize", resizeCanvas);
-    };
-  }, []);
-
-  useEffect(() => {
     if (toolMode === "none") {
       clearCanvas();
     }
@@ -327,8 +326,13 @@ const InteractionCanvas: React.FC<InteractionCanvasProps> = ({
 
   return (
     <CanvasContainer
+      ref={containerRef}
       toolMode={toolMode}
       disabled={disabled}
+      left={canvasPosition.left}
+      top={canvasPosition.top}
+      width={canvasPosition.width}
+      height={canvasPosition.height}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
