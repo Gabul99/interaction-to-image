@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { type FeedbackArea } from "../types";
+import { type FeedbackArea, type ObjectChip, type BoundingBox, type CompositionState, type FeedbackRecord } from "../types";
 
 export interface ImageStep {
   id: string; // 서버에서 보내준 UUID
@@ -15,6 +15,16 @@ export interface ImageSession {
   steps: ImageStep[]; // 각 스텝의 이미지들
   isComplete: boolean;
   createdAt: number;
+  compositionBboxes?: Array<{
+    id: string;
+    objectId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    color: string;
+  }>; // 구도 설정 시 사용된 BBOX들
+  bboxFeedbackHistory?: Record<string, FeedbackRecord[]>; // BBOX별 피드백 히스토리 (bboxId -> FeedbackRecord[])
 }
 
 export interface ImageStreamState {
@@ -40,6 +50,12 @@ export interface ImageStreamState {
     area: FeedbackArea;
   } | null;
 
+  // 현재 턴의 피드백 리스트
+  currentFeedbackList: FeedbackRecord[];
+
+  // 구도 설정 상태
+  compositionState: CompositionState;
+
   // Actions
   startGeneration: (prompt: string, interval?: number) => void;
   setGenerationInterval: (interval: number) => void;
@@ -49,10 +65,40 @@ export interface ImageStreamState {
   pauseGeneration: () => void; // 생성 일시정지
   resumeGeneration: () => void; // 생성 재개
   selectStep: (stepIndex: number | null) => void; // 특정 스텝 선택 또는 최신으로 돌아가기
+  resetSession: () => void; // 세션 초기화
 
   // 피드백 관련 액션
   showFeedbackRequest: (area: FeedbackArea) => void;
   hideFeedbackRequest: () => void;
+  addFeedbackToCurrentList: (feedback: FeedbackRecord) => void;
+  removeFeedbackFromCurrentList: (feedbackId: string) => void;
+  clearCurrentFeedbackList: () => void;
+
+  // 구도 설정 관련 액션
+  setObjectList: (objects: ObjectChip[]) => void;
+  addObject: (label: string) => void;
+  removeObject: (objectId: string) => void;
+  selectObject: (objectId: string | null) => void;
+  addBbox: (bbox: Omit<BoundingBox, "id">) => void;
+  updateBbox: (bboxId: string, updates: Partial<BoundingBox>) => void;
+  removeBbox: (bboxId: string) => void;
+  clearComposition: () => void;
+  startGenerationWithComposition: (prompt: string, bboxes?: BoundingBox[], interval?: number) => void;
+  
+  // 현재 세션의 구도 BBOX 가져오기
+  getCurrentCompositionBboxes: () => Array<{
+    id: string;
+    objectId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    color: string;
+  }> | null;
+
+  // 피드백 기록 관련 (BBOX별)
+  addFeedbackToBboxHistory: (bboxId: string, feedback: FeedbackRecord) => void;
+  getFeedbackHistoryForBbox: (bboxId: string) => FeedbackRecord[];
 
   // Socket 시뮬레이션
   simulateImageStream: (
@@ -71,6 +117,13 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   isConnected: false,
   generationInterval: 1, // 기본값: 매 스텝마다
   feedbackRequest: null,
+  currentFeedbackList: [],
+  compositionState: {
+    objects: [],
+    bboxes: [],
+    selectedObjectId: null,
+    isConfigured: false,
+  },
 
   // 이미지 생성 시작
   startGeneration: (prompt: string, interval?: number) => {
@@ -149,6 +202,17 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     });
   },
 
+  // 세션 초기화 (새로운 이미지 생성을 위해)
+  resetSession: () => {
+    set({
+      currentSession: null,
+      selectedStepIndex: null,
+      isGenerating: false,
+      isPaused: false,
+      isConnected: false,
+    });
+  },
+
   // 생성 일시정지
   pauseGeneration: () => {
     set({ isPaused: true });
@@ -214,6 +278,217 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         state.generationInterval
       );
     }
+  },
+
+  // 현재 턴의 피드백 리스트에 추가
+  addFeedbackToCurrentList: (feedback: FeedbackRecord) => {
+    set((state) => ({
+      currentFeedbackList: [...state.currentFeedbackList, feedback],
+    }));
+  },
+
+  // 현재 턴의 피드백 리스트에서 제거
+  removeFeedbackFromCurrentList: (feedbackId: string) => {
+    set((state) => ({
+      currentFeedbackList: state.currentFeedbackList.filter(
+        (f) => f.id !== feedbackId
+      ),
+    }));
+  },
+
+  // 현재 턴의 피드백 리스트 초기화
+  clearCurrentFeedbackList: () => {
+    set({ currentFeedbackList: [] });
+  },
+
+  // 객체 리스트 설정
+  setObjectList: (objects: ObjectChip[]) => {
+    set({
+      compositionState: {
+        ...get().compositionState,
+        objects,
+        selectedObjectId: null,
+        bboxes: [], // 새로운 객체 리스트가 오면 BBOX 초기화
+      },
+    });
+  },
+
+  // 객체 추가
+  addObject: (label: string) => {
+    const state = get();
+    const colors = [
+      "#6366f1", "#8b5cf6", "#ec4899", "#f43f5e", "#ef4444",
+      "#f59e0b", "#eab308", "#84cc16", "#22c55e", "#10b981",
+      "#14b8a6", "#06b6d4", "#0ea5e9", "#3b82f6", "#6366f1",
+    ];
+    const existingColors = state.compositionState.objects.map(obj => obj.color);
+    const availableColor = colors.find(c => !existingColors.includes(c)) || colors[state.compositionState.objects.length % colors.length];
+    
+    const newObject: ObjectChip = {
+      id: `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      label,
+      color: availableColor,
+    };
+
+    set({
+      compositionState: {
+        ...state.compositionState,
+        objects: [...state.compositionState.objects, newObject],
+      },
+    });
+  },
+
+  // 객체 삭제
+  removeObject: (objectId: string) => {
+    const state = get();
+    set({
+      compositionState: {
+        ...state.compositionState,
+        objects: state.compositionState.objects.filter(obj => obj.id !== objectId),
+        bboxes: state.compositionState.bboxes.filter(bbox => bbox.objectId !== objectId),
+        selectedObjectId: state.compositionState.selectedObjectId === objectId ? null : state.compositionState.selectedObjectId,
+      },
+    });
+  },
+
+  // 객체 선택
+  selectObject: (objectId: string | null) => {
+    set({
+      compositionState: {
+        ...get().compositionState,
+        selectedObjectId: objectId,
+      },
+    });
+  },
+
+  // BBOX 추가
+  addBbox: (bbox: Omit<BoundingBox, "id">) => {
+    const state = get();
+    const newBbox: BoundingBox = {
+      ...bbox,
+      id: `bbox_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    };
+    set({
+      compositionState: {
+        ...state.compositionState,
+        bboxes: [...state.compositionState.bboxes, newBbox],
+      },
+    });
+  },
+
+  // BBOX 업데이트
+  updateBbox: (bboxId: string, updates: Partial<BoundingBox>) => {
+    const state = get();
+    set({
+      compositionState: {
+        ...state.compositionState,
+        bboxes: state.compositionState.bboxes.map(bbox =>
+          bbox.id === bboxId ? { ...bbox, ...updates } : bbox
+        ),
+      },
+    });
+  },
+
+  // BBOX 삭제
+  removeBbox: (bboxId: string) => {
+    const state = get();
+    set({
+      compositionState: {
+        ...state.compositionState,
+        bboxes: state.compositionState.bboxes.filter(bbox => bbox.id !== bboxId),
+      },
+    });
+  },
+
+  // 구도 설정 초기화
+  clearComposition: () => {
+    set({
+      compositionState: {
+        objects: [],
+        bboxes: [],
+        selectedObjectId: null,
+        isConfigured: false,
+      },
+    });
+  },
+
+  // 구도 설정과 함께 생성 시작
+  startGenerationWithComposition: (prompt: string, bboxes?: BoundingBox[], interval?: number) => {
+    const state = get();
+    // 구도 설정 완료 표시
+    set({
+      compositionState: {
+        ...state.compositionState,
+        isConfigured: true,
+      },
+    });
+    
+    // 세션 생성 시 구도 BBOX 정보 포함
+    const sessionId = `session_${Date.now()}`;
+    const selectedInterval = interval || state.generationInterval;
+
+    const newSession: ImageSession = {
+      id: sessionId,
+      prompt,
+      totalSteps: 20,
+      steps: [],
+      isComplete: false,
+      createdAt: Date.now(),
+      compositionBboxes: bboxes?.map(bbox => ({
+        id: bbox.id,
+        objectId: bbox.objectId,
+        x: bbox.x,
+        y: bbox.y,
+        width: bbox.width,
+        height: bbox.height,
+        color: bbox.color,
+      })),
+    };
+
+    set({
+      currentSession: newSession,
+      selectedStepIndex: null,
+      isGenerating: true,
+      isPaused: false,
+      isConnected: true,
+      generationInterval: selectedInterval,
+    });
+
+    // Socket 시뮬레이션 시작
+    get().simulateImageStream(sessionId, prompt, selectedInterval);
+  },
+  
+  // 현재 세션의 구도 BBOX 가져오기
+  getCurrentCompositionBboxes: () => {
+    const state = get();
+    return state.currentSession?.compositionBboxes || null;
+  },
+
+  // BBOX별 피드백 히스토리에 추가
+  addFeedbackToBboxHistory: (bboxId: string, feedback: FeedbackRecord) => {
+    const state = get();
+    if (!state.currentSession) return;
+
+    const currentHistory = state.currentSession.bboxFeedbackHistory || {};
+    const bboxHistory = currentHistory[bboxId] || [];
+
+    set({
+      currentSession: {
+        ...state.currentSession,
+        bboxFeedbackHistory: {
+          ...currentHistory,
+          [bboxId]: [...bboxHistory, feedback],
+        },
+      },
+    });
+  },
+
+  // 특정 BBOX의 피드백 히스토리 가져오기
+  getFeedbackHistoryForBbox: (bboxId: string) => {
+    const state = get();
+    if (!state.currentSession?.bboxFeedbackHistory) return [];
+
+    return state.currentSession.bboxFeedbackHistory[bboxId] || [];
   },
 
   // Socket 시뮬레이션 (실제 서버 대신)

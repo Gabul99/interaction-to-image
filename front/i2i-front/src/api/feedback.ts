@@ -1,71 +1,131 @@
 import { type FeedbackData } from "../types";
 
-// 서버와 소켓 통신을 한다고 가정
-// 실제로는 WebSocket을 통해 전송하거나, REST API를 사용할 수 있습니다
-
 /**
- * 피드백을 서버로 전송합니다.
- * @param feedback 피드백 데이터
+ * API Endpoint: POST /api/feedback
+ *
+ * 중간 피드백 턴에 여러 개의 피드백을 한번에 서버로 전송합니다.
+ *
+ * @param sessionId 세션 ID
+ * @param feedbacks 피드백 데이터 배열
  */
-export async function sendFeedbackToServer(
-  feedback: FeedbackData
+export async function submitFeedbacks(
+  sessionId: string,
+  feedbacks: FeedbackData[]
 ): Promise<void> {
-  // 실제 서버 구현 시 이 부분을 수정해야 합니다
-  console.log("피드백 서버로 전송:", feedback);
-
-  // FormData를 사용하여 파일과 함께 전송
-  const formData = new FormData();
-  formData.append("area", feedback.area);
-  formData.append("type", feedback.type);
-
-  if (feedback.text) {
-    formData.append("text", feedback.text);
-  }
-
-  if (feedback.image) {
-    formData.append("image", feedback.image);
-  }
-
-  if (feedback.point) {
-    formData.append("pointX", feedback.point.x.toString());
-    formData.append("pointY", feedback.point.y.toString());
-  }
-
-  if (feedback.bbox) {
-    formData.append("bboxX", feedback.bbox.x.toString());
-    formData.append("bboxY", feedback.bbox.y.toString());
-    formData.append("bboxWidth", feedback.bbox.width.toString());
-    formData.append("bboxHeight", feedback.bbox.height.toString());
-  }
+  console.log("[API] 피드백 제출 요청:", {
+    sessionId,
+    count: feedbacks.length,
+  });
 
   try {
-    // 실제 서버 endpoint로 전송
-    // 예시: await fetch('/api/feedback', { method: 'POST', body: formData });
+    // TODO: 실제 백엔드 연결 시 아래 주석을 해제하고 mockup 코드를 제거
+    /*
+    // FormData를 사용하여 파일과 함께 전송
+    const formData = new FormData();
+    formData.append("sessionId", sessionId);
+    
+    // 피드백 배열을 JSON으로 직렬화
+    const feedbacksJson = feedbacks.map(feedback => {
+      const feedbackObj: any = {
+        area: feedback.area,
+        type: feedback.type,
+      };
+      
+      if (feedback.text) feedbackObj.text = feedback.text;
+      if (feedback.point) {
+        feedbackObj.point = { x: feedback.point.x, y: feedback.point.y };
+      }
+      if (feedback.bbox) {
+        feedbackObj.bbox = {
+          x: feedback.bbox.x,
+          y: feedback.bbox.y,
+          width: feedback.bbox.width,
+          height: feedback.bbox.height,
+        };
+      }
+      
+      return feedbackObj;
+    });
+    
+    formData.append("feedbacks", JSON.stringify(feedbacksJson));
+    
+    // 이미지 파일들은 별도로 추가
+    feedbacks.forEach((feedback, index) => {
+      if (feedback.image) {
+        formData.append(`image_${index}`, feedback.image);
+      }
+    });
+    
+    const response = await fetch('/api/feedback', {
+      method: 'POST',
+      body: formData,
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    console.log("[API] 피드백 제출 완료");
+    */
 
-    // 현재는 시뮬레이션으로만 처리
+    // ===== MOCKUP (백엔드 연결 전까지 사용) =====
     await new Promise((resolve) => setTimeout(resolve, 500));
-    console.log("피드백 전송 완료");
+    console.log("[API] 피드백 제출 완료 (Mockup)");
+    // ===== MOCKUP END =====
   } catch (error) {
-    console.error("피드백 전송 실패:", error);
+    console.error("[API] 피드백 제출 실패:", error);
     throw error;
   }
 }
 
 /**
+ * API Endpoint: POST /api/feedback/skip
+ *
  * 피드백 요청을 건너뛰고 서버에 알립니다.
+ *
+ * @param sessionId 세션 ID
  */
-export async function skipFeedback(): Promise<void> {
-  console.log("피드백 건너뛰기");
+export async function skipFeedback(sessionId: string): Promise<void> {
+  console.log("[API] 피드백 건너뛰기 요청:", sessionId);
 
   try {
-    // 실제 서버 endpoint로 전송
-    // 예시: await fetch('/api/feedback/skip', { method: 'POST' });
+    // TODO: 실제 백엔드 연결 시 아래 주석을 해제하고 mockup 코드를 제거
+    /*
+    const response = await fetch('/api/feedback/skip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    console.log("[API] 피드백 건너뛰기 완료");
+    */
 
-    // 현재는 시뮬레이션으로만 처리
+    // ===== MOCKUP (백엔드 연결 전까지 사용) =====
     await new Promise((resolve) => setTimeout(resolve, 300));
-    console.log("피드백 건너뛰기 완료");
+    console.log("[API] 피드백 건너뛰기 완료 (Mockup)");
+    // ===== MOCKUP END =====
   } catch (error) {
-    console.error("피드백 건너뛰기 실패:", error);
+    console.error("[API] 피드백 건너뛰기 실패:", error);
     throw error;
   }
+}
+
+/**
+ * @deprecated 이 함수는 submitFeedbacks로 통합되었습니다.
+ * 하위 호환성을 위해 유지되지만, 새로운 코드에서는 submitFeedbacks를 사용하세요.
+ */
+export async function sendFeedbackToServer(
+  feedback: FeedbackData
+): Promise<void> {
+  console.warn(
+    "[API] sendFeedbackToServer는 deprecated입니다. submitFeedbacks를 사용하세요."
+  );
+
+  // 단일 피드백을 배열로 변환하여 submitFeedbacks 호출
+  // sessionId는 임시로 빈 문자열 사용 (실제로는 세션 ID가 필요)
+  await submitFeedbacks("", [feedback]);
 }

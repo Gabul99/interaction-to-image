@@ -20,3 +20,39 @@ export interface FeedbackData {
   point?: { x: number; y: number }; // 포인팅의 경우 좌표
   bbox?: { x: number; y: number; width: number; height: number }; // BBOX의 경우 좌표
 }
+
+export interface FeedbackRecord {
+  id: string;
+  area: FeedbackArea;
+  type: FeedbackType;
+  text?: string;
+  imageUrl?: string; // 이미지 피드백의 경우 URL
+  point?: { x: number; y: number };
+  bbox?: { x: number; y: number; width: number; height: number };
+  bboxId?: string; // BBOX의 경우 ID
+  timestamp: number;
+}
+
+// 객체 및 구도 설정 관련 타입
+export interface ObjectChip {
+  id: string;
+  label: string;
+  color: string; // hex color
+}
+
+export interface BoundingBox {
+  id: string;
+  objectId: string; // 연결된 객체의 id
+  x: number; // 상대 좌표 (0~1)
+  y: number; // 상대 좌표 (0~1)
+  width: number; // 상대 크기 (0~1)
+  height: number; // 상대 크기 (0~1)
+  color: string; // 객체의 색상
+}
+
+export interface CompositionState {
+  objects: ObjectChip[];
+  bboxes: BoundingBox[];
+  selectedObjectId: string | null;
+  isConfigured: boolean;
+}

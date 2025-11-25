@@ -28,7 +28,9 @@ const Image = styled.img`
   display: block;
 `;
 
-const PlaceholderImage = styled.div`
+const PlaceholderImage = styled.div.withConfig({
+  shouldForwardProp: () => true,
+})`
   width: 512px;
   height: 512px;
   background: linear-gradient(135deg, #1f2937 0%, #374151 100%);
@@ -65,6 +67,7 @@ interface ImageViewerProps {
   isLoading?: boolean;
   onImageLoad?: () => void;
   imageRef?: React.RefObject<HTMLImageElement | null>;
+  placeholderRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 const ImageViewer: React.FC<ImageViewerProps> = ({
@@ -72,6 +75,7 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
   isLoading = false,
   onImageLoad,
   imageRef,
+  placeholderRef,
 }) => {
   console.log("imageUrl", imageUrl);
 
@@ -88,14 +92,14 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
             onLoad={onImageLoad}
           />
         ) : (
-          <PlaceholderImage>
+          <PlaceholderImage ref={placeholderRef}>
             {isLoading ? (
               <>
                 <LoadingSpinner />
                 <div style={{ marginTop: "16px" }}>이미지 생성 중...</div>
               </>
             ) : (
-              "프롬프트를 입력하고 이미지 생성을 시작하세요"
+              "객체를 선택하고 이 곳에서 구도를 설정하세요"
             )}
           </PlaceholderImage>
         )}
