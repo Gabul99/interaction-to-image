@@ -181,11 +181,19 @@ def aggregated_grounding_loss(attn_maps, bbox_list, object_positions, latent_h, 
 
 def GroundingUpdateFunc(pipe, latents, timestep, timestep_idx, denoiser_args, loss_args, enabled: bool = True):
     """
-    Update latents using aggregated grounding guidance only.
-    """
-    if not enabled:
-        return latents.half(), None
+    Update latents during the denoising process with grounding loss.
 
+    Args:
+        pipe: The pipeline object with scheduling and model functions.
+        latents: The latent tensor to update.
+        timestep: Current timestep in the denoising schedule.
+        timestep_idx: Index of the current timestep.
+        denoiser_args: Dictionary containing denoiser parameters.
+        loss_args: Dictionary containing loss-related parameters.
+
+    Returns:
+        Tuple: Updated latents and the computed loss.
+    """
     # Clone and prepare latents
     latents = latents.clone().detach().float().requires_grad_(True)
 
@@ -194,26 +202,21 @@ def GroundingUpdateFunc(pipe, latents, timestep, timestep_idx, denoiser_args, lo
     latent_model_input = pipe.scheduler.scale_model_input(latent_model_input, timestep)
 
     # Process timestep for transformer
-    current_timestep = pipe._timestep_process(timestep, latent_model_input.device, latent_model_input.shape[0])
+    timestep = pipe._timestep_process(timestep, latent_model_input.device, latent_model_input.shape[0])
 
-    # Forward pass to get attention maps
-    noise_pred, attn_maps, _ = pipe.transformer(
+    # Forward pass through the transformer to get attention maps
+    _, attn_maps, _ = pipe.transformer(
         latent_model_input.half(),
         encoder_hidden_states=denoiser_args["prompt_embeds"],
         encoder_attention_mask=denoiser_args["prompt_attention_mask"],
-        timestep=current_timestep,
+        timestep=timestep,
         added_cond_kwargs=denoiser_args["added_cond_kwargs"],
         return_dict=False,
-        return_attn_maps=True,
-        is_object_branch=False,
+        return_attn_maps=True,  # GrounDiT flag
+        is_object_branch=False,  # GrounDiT flag
     )
 
-    # Adjust noise prediction for learned sigma (kept for parity with main branch)
-    latent_channels = latents.shape[1]
-    if pipe.transformer.config.out_channels // 2 == latent_channels:
-        noise_pred = noise_pred.chunk(2, dim=1)[0]
-
-    # Calculate the grounding loss (spatial)
+    # Calculate the grounding loss
     grounding_loss = aggregated_grounding_loss(
         attn_maps,
         bbox_list=loss_args["bbox_list"],
@@ -224,20 +227,18 @@ def GroundingUpdateFunc(pipe, latents, timestep, timestep_idx, denoiser_args, lo
     )
     grounding_loss = grounding_loss * loss_args["loss_scale"]
 
-    total_loss = grounding_loss
-    if total_loss is not None and (total_loss.requires_grad or (hasattr(total_loss, "grad_fn") and total_loss.grad_fn is not None)):
-        grad_cond = torch.autograd.grad(total_loss.requires_grad_(True), [latents])[0]
+    # Update latents based on gradient if loss is non-zero
+    if grounding_loss != 0:
+        grad_cond = torch.autograd.grad(grounding_loss.requires_grad_(True), [latents])[0]
         grad_cond = torch.nan_to_num(grad_cond)
         latents = latents - grad_cond * loss_args["gradient_weight"]
     elif timestep_idx < 5:
-        grounding_loss = torch.tensor(10.0, device=latents.device, dtype=latents.dtype)
+        grounding_loss = 10
 
     # Cleanup
     del attn_maps
-    del noise_pred
     torch.cuda.empty_cache()
 
-    # Return grounding loss for controlling the update loop's early-stop behavior
     return latents.half(), grounding_loss
 
 

@@ -902,7 +902,6 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         max_sequence_length: int = 120,
 
         # (1) General Arguments
-        groundit_gamma=0.5,
         bbox_list = None, 
         phrases = None,
         phrases_idx = None,
@@ -913,20 +912,20 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         global_update_max_iter_per_step = 3,
 
         # (3) Reference Image Guidance (CLIP)
-        ref_image_path: Optional[str] = None,
-        clip_guidance_scale: float = 10.0,
+        ref_image_path: Optional[str] = "images/starry_night.png", # low res image works better
+        clip_guidance_scale: float = 10.0, # adjustable
 
-        # (4) Text Guidance (CLIP)
-        text_guidance_scale: float = 5.0,
+        # (4) Text Guidance (CLIP/SigLIP)
         text_guidance_text: Optional[Union[str, List[str]]] = "Eyes closed",
+        text_guidance_scale: float = 5.0, # adjustable
 
         # (5) Enable/disable guidance types
-        enable_grounding_guidance: bool = False,
+        enable_grounding_guidance: bool = True,
         enable_clip_guidance: bool = False,
-        enable_text_guidance: bool = True,
+        enable_text_guidance: bool = False,
 
         # (6) Guidance application intervals (step index inclusive ranges)
-        layout_guidance_intervals: Optional[List[Tuple[int, int]]] = None,
+        layout_guidance_intervals: Optional[List[Tuple[int, int]]] = [(0, 25)], # best
         clip_guidance_intervals: Optional[List[Tuple[int, int]]] = [(30, 50)],
         text_guidance_intervals: Optional[List[Tuple[int, int]]] = [(35, 50)],
 
@@ -1182,9 +1181,6 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         self.set_progress_bar_config(leave=False)
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
-
-        # Set the number of denoising steps for GrounDiT
-        groundit_denoising_step = int(num_inference_steps * groundit_gamma)
         
         denoiser_args = {
             "prompt_embeds": prompt_embeds, 
@@ -1230,9 +1226,6 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         # Normalize default intervals
         if not enable_grounding_guidance:
             layout_guidance_intervals = []
-        elif layout_guidance_intervals is None:
-            ground_end = max(0, groundit_denoising_step - 1)
-            layout_guidance_intervals = [(0, ground_end)] if ground_end >= 0 else []
         if not enable_clip_guidance:
             clip_guidance_intervals = []
         elif clip_guidance_intervals is None:
@@ -1365,15 +1358,61 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="results")
     parser.add_argument("--model_version", choices=["512", "1024"], default="512")
-    parser.add_argument("--input_config_path", type=str, default="./config.json")
+    parser.add_argument("--input_config_path", type=str, default="./config.json") # input config file path
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=67)
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Number of inference steps.")
-    parser.add_argument("--groundit_gamma", type=float, default=1.0, help="Apply GrounDiT for initial gamma range of timesteps.")
-    parser.add_argument("--ref_image_path", type=str, default=None, help="Path to reference image for CLIP guidance.")
-    parser.add_argument("--clip_guidance_scale", type=float, default=0.0, help="Scale for CLIP image guidance loss.")
 
+    # Layout guidance
+    parser.add_argument("--enable_grounding_guidance",action="store_true", help="Enable layout grounding guidance.")
+    parser.add_argument("--layout_guidance_intervals",type=str,default="0-25", help="Layout guidance intervals as step ranges, e.g. '0-25,30-40'.")
+    
+    # Style guidance
+    parser.add_argument("--enable_clip_guidance",action="store_true", help="Enable CLIP image guidance.")
+    parser.add_argument("--clip_guidance_intervals",type=str,default="30-50", help="CLIP image guidance intervals as step ranges, e.g. '30-50'.")
+    parser.add_argument("--clip_guidance_scale", type=float, default=5.0, help="Scale for CLIP image guidance loss.")
+    parser.add_argument("--ref_image_path", type=str, default=None, help="Path to reference image for CLIP guidance.")
+
+    # Text guidance
+    parser.add_argument("--enable_text_guidance",action="store_true", help="Enable text guidance (CLIP/SigLIP).")
+    parser.add_argument("--text_guidance_intervals",type=str,default="35-50", help="Text guidance intervals as step ranges, e.g. '35-50'.")
+    parser.add_argument("--text_guidance_scale",type=float,default=10.0, help="Scale for CLIP/SigLIP text guidance loss.")
+    parser.add_argument("--text_guidance_text",type=str,default="Eyes closed", help="Text used for CLIP/SigLIP text guidance.")
+
+    # example commands
+    # python pipeline.py --enable_grounding_guidance --input_config_path "config/config.json" --layout_guidance_intervals "0-25"
+    # python pipeline.py --enable_clip_guidance --input_config_path "config/config.json" --clip_guidance_intervals "30-50" --ref_image_path "images/starry_night.png" --clip_guidance_scale 5.0
+    # python pipeline.py --enable_text_guidance --input_config_path "config/config.json" --text_guidance_intervals "35-50" --text_guidance_text "Eyes closed" --text_guidance_scale 10.0
     args = parser.parse_args()
+
+    def _parse_intervals(interval_str):
+        """
+        Parse a string like '0-25,30-40' or '10,20-30' into
+        a list of (start, end) integer tuples.
+        """
+        intervals = []
+        for part in interval_str.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start, end = part.split("-", 1)
+            elif ":" in part:
+                start, end = part.split(":", 1)
+            else:
+                start = end = part
+            intervals.append((int(start), int(end)))
+        return intervals
+
+    layout_intervals = (
+        _parse_intervals(args.layout_guidance_intervals) if args.layout_guidance_intervals else None
+    )
+    clip_intervals = (
+        _parse_intervals(args.clip_guidance_intervals) if args.clip_guidance_intervals else None
+    )
+    text_intervals = (
+        _parse_intervals(args.text_guidance_intervals) if args.text_guidance_intervals else None
+    )
 
 
     # Set seed and device
@@ -1477,23 +1516,37 @@ if __name__ == "__main__":
                 pass
 
         # Generate sample
-        out = pipe(
-            prompt=prompt, 
-            width=original_width, 
-            height=original_height, 
-            latents=latent, 
+        pipe_kwargs = dict(
+            prompt=prompt,
+            width=original_width,
+            height=original_height,
+            latents=latent,
             num_inference_steps=args.num_inference_steps,
             # General Arguments
-            groundit_gamma=args.groundit_gamma,
-            bbox_list=bbox_list, 
-            phrases=phrases, 
+            bbox_list=bbox_list,
+            phrases=phrases,
             phrases_idx=phrases_idx,
-            # Reference image guidance
+            # Guidance configuration
             ref_image_path=args.ref_image_path,
             clip_guidance_scale=args.clip_guidance_scale,
+            text_guidance_text=args.text_guidance_text,
+            text_guidance_scale=args.text_guidance_scale,
+            enable_grounding_guidance=args.enable_grounding_guidance,
+            enable_clip_guidance=args.enable_clip_guidance,
+            enable_text_guidance=args.enable_text_guidance,
             callback=_traj_callback,
             callback_steps=1,
         )
+
+        # Only override default intervals when explicitly provided
+        if layout_intervals is not None:
+            pipe_kwargs["layout_guidance_intervals"] = layout_intervals
+        if clip_intervals is not None:
+            pipe_kwargs["clip_guidance_intervals"] = clip_intervals
+        if text_intervals is not None:
+            pipe_kwargs["text_guidance_intervals"] = text_intervals
+
+        out = pipe(**pipe_kwargs)
 
         # Save the generated samples
         image = out.images[0]
