@@ -6,8 +6,8 @@ const ImageViewerContainer = styled.div`
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding-top: 60px;
-  min-height: 60vh;
+  padding: 60px;
+  height: fit-content;
   width: 100%;
 `;
 

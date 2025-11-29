@@ -56,3 +56,34 @@ export interface CompositionState {
   selectedObjectId: string | null;
   isConfigured: boolean;
 }
+
+// 그래프 관련 타입
+export interface GraphNode {
+  id: string;
+  type: 'prompt' | 'image';
+  data: {
+    prompt?: string;
+    imageUrl?: string;
+    step?: number;
+    sessionId?: string;
+  };
+  position: { x: number; y: number };
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type?: 'default' | 'branch';
+  data?: {
+    feedback?: FeedbackRecord[];
+    branchId?: string;
+  };
+}
+
+export interface Branch {
+  id: string;
+  sourceNodeId: string; // 브랜치가 시작된 노드
+  feedback: FeedbackRecord[];
+  nodes: string[]; // 이 브랜치에 속한 노드 ID들
+}
