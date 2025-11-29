@@ -22,9 +22,11 @@ import argparse
 from functools import partial
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from PIL import Image
 import urllib.parse as ul
 from typing import Callable, List, Optional, Tuple, Union
 from datetime import datetime
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -912,22 +914,39 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         global_update_max_iter_per_step = 3,
 
         # (3) Reference Image Guidance (CLIP)
-        ref_image_path: Optional[str] = "images/starry_night.png", # low res image works better
-        clip_guidance_scale: float = 10.0, # adjustable
+        ref_image_paths: Optional[List[str]] = ["/home/jaesang/i2i/images/pattern.png"],
+        clip_guidance_scale: float = 2.0,
+        # Region for CLIP style guidance (normalized [x0,y0,x1,y1] in [0,1])
+        clip_guidance_regions: Optional[List[List[float]]] = [(0.15, 0.10, 0.40, 0.3)],
 
-        # (4) Text Guidance (CLIP/SigLIP)
-        text_guidance_text: Optional[Union[str, List[str]]] = "Eyes closed",
-        text_guidance_scale: float = 5.0, # adjustable
+        # (4) Text Guidance (CLIP)
+        text_guidance_scale: float = 2.0,
+        text_guidance_text: Optional[Union[str, List[str]]] = ["Eyes closed"],
+        # Regions for text guidance (normalized [x0,y0,x1,y1] in [0,1]); either single or per-text list
+        text_guidance_regions: Optional[List[List[float]]] = [(0.15, 0.10, 0.40, 1.0)],
 
         # (5) Enable/disable guidance types
-        enable_grounding_guidance: bool = True,
-        enable_clip_guidance: bool = False,
+        enable_grounding_guidance: bool = False,
+        enable_clip_guidance: bool = True,
         enable_text_guidance: bool = False,
+        enable_edge_guidance: bool = False,
 
         # (6) Guidance application intervals (step index inclusive ranges)
         layout_guidance_intervals: Optional[List[Tuple[int, int]]] = [(0, 25)], # best
-        clip_guidance_intervals: Optional[List[Tuple[int, int]]] = [(30, 50)],
+        clip_guidance_intervals: Optional[List[Tuple[int, int]]] = [(35, 50)],
         text_guidance_intervals: Optional[List[Tuple[int, int]]] = [(35, 50)],
+        edge_guidance_intervals: Optional[List[Tuple[int, int]]] = [(0, 30)],
+        # (7) Save intermediates
+        save_intermediates_dir: Optional[str] = None,
+        save_edge_maps_dir: Optional[str] = "/home/jaesang/i2i/edge_maps",
+        save_target_edge_maps_dir: Optional[str] = "/home/jaesang/i2i/target_edge_maps",
+
+        # (8) Edge guidance inputs
+        edge_guidance_images: Optional[List[Union[str, torch.Tensor]]] = ["/home/jaesang/i2i/sketch/dog_left.png", "/home/jaesang/i2i/sketch/cat_right.png"],
+        edge_guidance_scale: float = 2.0,
+        # Preprocess hard line drawings into soft edges before Sobel
+        # Options: "auto" | "hed" | "canny" | "none"
+        edge_preprocessor: str = "hed",
 
         **kwargs,
     ) -> Union[ImagePipelineOutput, Tuple]:
@@ -999,6 +1018,10 @@ class PixArtAlphaPipeline(DiffusionPipeline):
                 `ASPECT_RATIO_1024_BIN`. After the produced latents are decoded into images, they are resized back to
                 the requested resolution. Useful for generating non-square images.
             max_sequence_length (`int` defaults to 120): Maximum sequence length to use with the `prompt`.
+            save_intermediates_dir (`str`, *optional*):
+                If provided, saves the decoded predicted image x0 at every denoising step into this directory as
+                files named like `step_XXXX_img_YY.png`. Decoding follows the same postprocess/cropping used for final
+                output when resolution binning is enabled.
 
         Examples:
 
@@ -1151,21 +1174,39 @@ class PixArtAlphaPipeline(DiffusionPipeline):
             }
         
 
-        # Prepare CLIP image encoder if reference guidance requested and enabled
-        if enable_clip_guidance and ref_image_path is not None and clip_guidance_scale is not None and clip_guidance_scale > 0.0:
-            # Initialize once per call; reuse if same path is passed repeatedly
-            try:
+        # Prepare CLIP image encoder(s) if reference guidance requested and enabled
+        if enable_clip_guidance and clip_guidance_scale is not None and clip_guidance_scale > 0.0:
+            # Multiple reference images path list takes precedence when provided
+            if ref_image_paths is not None and isinstance(ref_image_paths, (list, tuple)) and len(ref_image_paths) > 0:
+                cached = getattr(self, "_clip_ref_image_paths", None)
+                if not hasattr(self, "clip_image_encoders") or cached is None or tuple(ref_image_paths) != tuple(cached):
+                    encoders: List[CLIPEncoder] = []
+                    for _p in ref_image_paths:
+                        try:
+                            enc = CLIPEncoder(need_ref=True, ref_path=_p).to(device)
+                            if hasattr(enc, "ref"):
+                                enc.ref = enc.ref.to(device)
+                            encoders.append(enc)
+                        except Exception:
+                            continue
+                    if len(encoders) > 0:
+                        self.clip_image_encoders = encoders
+                        self._clip_ref_image_paths = tuple(ref_image_paths)
+                        # Back-compat: also expose first encoder at legacy attribute
+                        self.clip_image_encoder = self.clip_image_encoders[0]
+            # Fallback to single-path behavior
+            elif ref_image_path is not None:
                 if not hasattr(self, "clip_image_encoder") or getattr(self, "_clip_ref_image_path", None) != ref_image_path:
-                    self.clip_image_encoder = CLIPEncoder(need_ref=True, ref_path=ref_image_path).to(device)
-                    # Ensure reference tensor is on the same device (not registered as buffer in the external lib)
-                    if hasattr(self.clip_image_encoder, "ref"):
-                        self.clip_image_encoder.ref = self.clip_image_encoder.ref.to(device)
-                    self._clip_ref_image_path = ref_image_path
-            except Exception as e:
-                # Fallback to disabling CLIP guidance if initialization fails
-                self.clip_image_encoder = None
-                self._clip_ref_image_path = None
-                clip_guidance_scale = 0.0
+                    try:
+                        self.clip_image_encoder = CLIPEncoder(need_ref=True, ref_path=ref_image_path).to(device)
+                        if hasattr(self.clip_image_encoder, "ref"):
+                            self.clip_image_encoder.ref = self.clip_image_encoder.ref.to(device)
+                        self._clip_ref_image_path = ref_image_path
+                        # Keep a list form for unified downstream handling
+                        self.clip_image_encoders = [self.clip_image_encoder]
+                        self._clip_ref_image_paths = (ref_image_path,)
+                    except Exception:
+                        pass
 
         # Prepare CLIP text encoder if text guidance is enabled
         if enable_text_guidance and text_guidance_scale is not None and text_guidance_scale > 0.0:
@@ -1181,6 +1222,28 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         self.set_progress_bar_config(leave=False)
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
+        # Prepare directory for saving intermediates, if requested
+        save_intermediates = save_intermediates_dir is not None and str(save_intermediates_dir) != ""
+        if save_intermediates:
+            try:
+                os.makedirs(save_intermediates_dir, exist_ok=True)
+            except Exception:
+                save_intermediates = False
+        
+        # Prepare directory for saving attention-based edge maps, if requested
+        save_edge_maps = save_edge_maps_dir is not None and str(save_edge_maps_dir) != ""
+        if save_edge_maps:
+            try:
+                os.makedirs(save_edge_maps_dir, exist_ok=True)
+            except Exception:
+                save_edge_maps = False
+        # Prepare directory for saving target edge maps, if requested
+        save_target_edge_maps = save_target_edge_maps_dir is not None and str(save_target_edge_maps_dir) != ""
+        if save_target_edge_maps:
+            try:
+                os.makedirs(save_target_edge_maps_dir, exist_ok=True)
+            except Exception:
+                save_target_edge_maps = False
         
         denoiser_args = {
             "prompt_embeds": prompt_embeds, 
@@ -1200,28 +1263,225 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         clip_guidance_args = {
             'clip_guidance_scale': clip_guidance_scale,
             'gradient_weight': gradient_weight,
+            'regions': clip_guidance_regions,
+            'ref_image_paths': ref_image_paths,
         }
+        # Edge guidance args (precompute per-object target edge maps at latent attention resolution)
+        edge_guidance_args = {
+            'edge_guidance_scale': edge_guidance_scale,
+            'gradient_weight': gradient_weight,
+            'loss_scale': loss_scale,
+            'bbox_list': bbox_list,
+            'phrases_idx': phrases_idx,
+            'height': height,
+            'width': width,
+            'object_edge_maps': None,
+            'save_edge_maps_dir': save_edge_maps_dir if save_edge_maps else None,
+        }
+        if enable_edge_guidance:
+            num_objects = len(bbox_list) if bbox_list is not None else 0
+            valid_imgs = isinstance(edge_guidance_images, (list, tuple)) and len(edge_guidance_images) >= num_objects and num_objects > 0
+            if not valid_imgs:
+                enable_edge_guidance = False
+            else:
+                latent_h_small = height // (self.vae_scale_factor * 2)
+                latent_w_small = width // (self.vae_scale_factor * 2)
+
+                def _to_gray_float_2d(img_like):
+                    if isinstance(img_like, str):
+                        im = Image.open(img_like).convert("L")
+                        arr = np.array(im, dtype=np.float32) / 255.0
+                        return torch.from_numpy(arr)
+                    elif isinstance(img_like, torch.Tensor):
+                        t = img_like.float()
+                        if t.ndim == 3:
+                            # [C,H,W] -> grayscale
+                            if t.shape[0] == 3:
+                                t = t.mean(dim=0)
+                            elif t.shape[0] == 1:
+                                t = t[0]
+                            else:
+                                t = t.mean(dim=0)
+                        elif t.ndim == 2:
+                            pass
+                        else:
+                            # Unsupported, try flatten
+                            t = t.view(-1).mean().unsqueeze(0)
+                        # Normalize to [0,1]
+                        t_min, t_max = t.min(), t.max()
+                        if (t_max - t_min) > 1e-6:
+                            t = (t - t_min) / (t_max - t_min)
+                        return t
+                    else:
+                        # Unsupported type
+                        return None
+                def _to_pil_rgb(img_like):
+                    if isinstance(img_like, str):
+                        im = Image.open(img_like).convert("RGB")
+                        return im.resize((width, height))
+                    elif isinstance(img_like, torch.Tensor):
+                        t = img_like.detach().cpu().float()
+                        if t.ndim == 2:
+                            # [H,W] grayscale -> RGB
+                            arr = (t.clamp(0, 1).numpy() * 255.0).astype(np.uint8)
+                            im = Image.fromarray(arr, mode="L").convert("RGB")
+                            return im.resize((width, height))
+                        elif t.ndim == 3:
+                            # [C,H,W]
+                            if t.shape[0] in (1, 3):
+                                if t.shape[0] == 1:
+                                    arr = (t[0].clamp(0, 1).numpy() * 255.0).astype(np.uint8)
+                                    im = Image.fromarray(arr, mode="L").convert("RGB")
+                                else:
+                                    arr = (t.clamp(0, 1).permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+                                    im = Image.fromarray(arr, mode="RGB")
+                                return im.resize((width, height))
+                            else:
+                                # Collapse channels if unusual
+                                arr = (t.mean(dim=0).clamp(0, 1).numpy() * 255.0).astype(np.uint8)
+                                im = Image.fromarray(arr, mode="L").convert("RGB")
+                                return im.resize((width, height))
+                    elif isinstance(img_like, np.ndarray):
+                        arr = img_like
+                        if arr.ndim == 2:
+                            im = Image.fromarray(arr.astype(np.uint8), mode="L").convert("RGB")
+                        elif arr.ndim == 3 and arr.shape[2] in (1, 3, 4):
+                            if arr.dtype != np.uint8:
+                                arr = np.clip(arr, 0, 255).astype(np.uint8)
+                            if arr.shape[2] == 1:
+                                im = Image.fromarray(arr[:, :, 0], mode="L").convert("RGB")
+                            elif arr.shape[2] == 3:
+                                im = Image.fromarray(arr, mode="RGB")
+                            else:
+                                im = Image.fromarray(arr[:, :, :3], mode="RGB")
+                        else:
+                            im = Image.fromarray(arr.astype(np.uint8))
+                        return im.resize((width, height))
+                    return None
+                def _pil_to_gray_float_2d(pil_im: "Image.Image"):
+                    im = pil_im.convert("L")
+                    arr = np.array(im, dtype=np.float32) / 255.0
+                    return torch.from_numpy(arr)
+                def _is_binary_like_gray(x_2d: torch.Tensor) -> bool:
+                    if x_2d is None:
+                        return False
+                    x = x_2d.detach().float()
+                    if x.numel() == 0:
+                        return False
+                    # Fraction of pixels near extremes
+                    extreme = ((x < 0.1) | (x > 0.9)).float().mean().item()
+                    # Count of unique 8-bit levels (small => likely binary/line art)
+                    try:
+                        uniq = torch.unique((x * 255).to(torch.uint8)).numel()
+                    except Exception:
+                        uniq = 256
+                    return (extreme > 0.95) or (uniq <= 8 and extreme > 0.8)
+                def _preprocess_to_soft_edges(img_like, method: str) -> Optional[torch.Tensor]:
+                    """
+                    Use controlnet_aux Processor to convert to soft edge maps.
+                    Returns a 2D torch tensor in [0,1] if successful, else None.
+                    """
+                    pil_rgb = _to_pil_rgb(img_like)
+                    if pil_rgb is None:
+                        return None
+                    proc_id = "softedge_hed" if method in ("hed", "softedge_hed") else ("canny" if method == "canny" else "softedge_hed")
+                    from controlnet_aux.processor import Processor
+                    processor = Processor(proc_id)
+                    pil_out = processor(pil_rgb, to_pil=True)
+                    if isinstance(pil_out, Image.Image):
+                        return _pil_to_gray_float_2d(pil_out)
+                    # Some processors may return numpy arrays
+                    if isinstance(pil_out, np.ndarray):
+                        if pil_out.ndim == 2:
+                            arr = pil_out.astype(np.float32)
+                        else:
+                            arr = pil_out[..., 0:3].mean(axis=-1).astype(np.float32)
+                        arr = arr / (255.0 if arr.max() > 1.0 else (arr.max() + 1e-6))
+                        return torch.from_numpy(arr)
+
+                    # Fallback: approximate with simple edge filter + blur to soften
+                    try:
+                        from PIL import ImageFilter
+                        edge = pil_rgb.convert("L").filter(ImageFilter.FIND_EDGES).filter(ImageFilter.GaussianBlur(radius=1.5))
+                        return _pil_to_gray_float_2d(edge)
+                    except Exception:
+                        return None
+                conv_dtype = self.smth_3.weight.dtype if hasattr(self.smth_3, "weight") else self.sobel_conv_x.weight.dtype
+                def _compute_sobel_edge_2d(x_2d: torch.Tensor):
+                    # resize to latent attention resolution and match module dtype/device
+                    conv_dtype = self.smth_3.weight.dtype if hasattr(self.smth_3, "weight") else self.sobel_conv_x.weight.dtype
+                    x = x_2d.to(device=device, dtype=conv_dtype)[None, None, :, :]
+                    x = F.interpolate(x, size=(latent_h_small, latent_w_small), mode="bilinear", align_corners=False)
+                    # reflect pad -> smooth -> sobel
+                    x = F.pad(x, (1, 1, 1, 1), mode="reflect")
+                    x = self.smth_3(x)
+                    sx = self.sobel_conv_x(x)
+                    sy = self.sobel_conv_y(x)
+                    mag = torch.sqrt(sx.pow(2) + sy.pow(2)).squeeze(0).squeeze(0)
+                    mag = mag / (mag.max() + 1e-6) if mag.max() > 0 else mag
+                    return mag
+
+                object_edge_maps: List[torch.Tensor] = []
+                for obj_idx in range(num_objects):
+                    # Load raw grayscale
+                    g_raw = _to_gray_float_2d(edge_guidance_images[obj_idx])
+                    if g_raw is None:
+                        enable_edge_guidance = False
+                        break
+                    # Optionally convert hard binary/line drawings to soft edges via HED/Canny
+                    g_for_edge: torch.Tensor
+                    if edge_preprocessor in ("hed", "softedge_hed", "canny"):
+                        g_soft = _preprocess_to_soft_edges(edge_guidance_images[obj_idx], "hed" if edge_preprocessor in ("hed", "softedge_hed") else "canny")
+                        g_for_edge = g_soft if g_soft is not None else g_raw
+                    elif edge_preprocessor == "auto":
+                        if _is_binary_like_gray(g_raw):
+                            g_soft = _preprocess_to_soft_edges(edge_guidance_images[obj_idx], "hed")
+                            g_for_edge = g_soft if g_soft is not None else g_raw
+                        else:
+                            g_for_edge = g_raw
+                    else:
+                        g_for_edge = g_raw
+                    # Compute Sobel magnitude on the (optionally) softened edge map
+                    target_edge = _compute_sobel_edge_2d(g_for_edge)
+                    target_edge = target_edge.to(device=device, dtype=conv_dtype)
+                    if save_target_edge_maps:
+                        arr = (target_edge.clamp(0, 1).detach().cpu().numpy() * 255.0).astype(np.uint8)
+                        im = Image.fromarray(arr, mode="L")
+                        im.save(os.path.join(save_target_edge_maps_dir, f"target_obj_{obj_idx:02d}.png"))
+                    object_edge_maps.append(target_edge)
+
+                if enable_edge_guidance:
+                    edge_guidance_args['object_edge_maps'] = object_edge_maps
         # Text guidance args
         # Use provided text or fallback to prompt
         if text_guidance_text is None:
             if isinstance(prompt, list):
-                _text_prompt = " ".join([str(p) for p in prompt])
+                _text_list = [str(p) for p in prompt]
+                _text_prompt = " ".join(_text_list)
             else:
-                _text_prompt = str(prompt) if prompt is not None else ""
+                _t = str(prompt) if prompt is not None else ""
+                _text_list = [_t]
+                _text_prompt = _t
         else:
             if isinstance(text_guidance_text, list):
-                _text_prompt = " ".join([str(p) for p in text_guidance_text])
+                _text_list = [str(p) for p in text_guidance_text]
+                _text_prompt = " ".join(_text_list)
             else:
-                _text_prompt = str(text_guidance_text)
+                _t = str(text_guidance_text)
+                _text_list = [_t]
+                _text_prompt = _t
         text_guidance_args = {
             'text_guidance_scale': text_guidance_scale,
             'text': _text_prompt,
+            'texts': _text_list,
+            'regions': text_guidance_regions,
         }
 
         # Guidance Update functions
         GroundingUpdate = partial(GroundingUpdateFunc, denoiser_args=denoiser_args, loss_args=grounding_update_args, enabled=enable_grounding_guidance)
         ClipUpdate = partial(ClipGuidanceUpdateFunc, denoiser_args=denoiser_args, clip_args=clip_guidance_args, enabled=enable_clip_guidance)
         TextUpdate = partial(TextGuidanceUpdateFunc, denoiser_args=denoiser_args, text_args=text_guidance_args, enabled=enable_text_guidance)
+        EdgeUpdate = partial(EdgeGuidanceUpdateFunc, denoiser_args=denoiser_args, edge_args=edge_guidance_args, enabled=enable_edge_guidance)
 
         # Normalize default intervals
         if not enable_grounding_guidance:
@@ -1235,6 +1495,10 @@ class PixArtAlphaPipeline(DiffusionPipeline):
         elif text_guidance_intervals is None:
             # If None, mirror clip intervals when provided; otherwise use entire range
             text_guidance_intervals = list(clip_guidance_intervals) if len(clip_guidance_intervals or []) > 0 else [(0, num_inference_steps - 1)]
+        if not enable_edge_guidance:
+            edge_guidance_intervals = []
+        elif edge_guidance_intervals is None:
+            edge_guidance_intervals = list(layout_guidance_intervals)
 
         def _in_intervals(step_idx: int, intervals: List[Tuple[int, int]]) -> bool:
             for s, e in intervals:
@@ -1251,6 +1515,15 @@ class PixArtAlphaPipeline(DiffusionPipeline):
                         while _iter_cnt < global_update_max_iter_per_step:
                             latents, loss = GroundingUpdate(self, latents, t, i)
                             if loss is None or loss <= loss_threshold:
+                                break
+                            _iter_cnt += 1
+
+                    # =========== Edge Guidance Update =========== #
+                    if enable_edge_guidance and _in_intervals(i, edge_guidance_intervals):
+                        _iter_cnt = 0
+                        while _iter_cnt < global_update_max_iter_per_step:
+                            latents, _edge_loss_val = EdgeUpdate(self, latents, t, i)
+                            if _edge_loss_val is None or _edge_loss_val <= loss_threshold:
                                 break
                             _iter_cnt += 1
 
@@ -1272,6 +1545,40 @@ class PixArtAlphaPipeline(DiffusionPipeline):
                             if _text_loss_val is None or _text_loss_val <= loss_threshold:
                                 break
                             _iter_cnt += 1
+
+                    # =========== Edge Map Save (if requested and not already saved via EdgeGuidance) =========== #
+                    if save_edge_maps and not (enable_edge_guidance and _in_intervals(i, edge_guidance_intervals)):
+                        try:
+                            with torch.no_grad():
+                                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                                current_timestep = self._timestep_process(t, latent_model_input.device, latent_model_input.shape[0])
+                                _, attn_maps, _ = self.transformer(
+                                    latent_model_input,
+                                    encoder_hidden_states=prompt_embeds,
+                                    encoder_attention_mask=prompt_attention_mask,
+                                    timestep=current_timestep,
+                                    added_cond_kwargs=added_cond_kwargs,
+                                    return_dict=False,
+                                    return_attn_maps=True,
+                                    is_object_branch=False,
+                                )
+                                latent_h = height // (self.vae_scale_factor * 2)
+                                latent_w = width // (self.vae_scale_factor * 2)
+                                save_attention_edge_maps(
+                                    attn_maps=attn_maps,
+                                    object_positions=phrases_idx,
+                                    bbox_list=bbox_list,
+                                    latent_h=latent_h,
+                                    latent_w=latent_w,
+                                    pipe=self,
+                                    save_dir=save_edge_maps_dir,
+                                    step_idx=i,
+                                )
+                                del attn_maps
+                                torch.cuda.empty_cache()
+                        except Exception:
+                            pass
 
                     with torch.no_grad():
                         misc_args = {
@@ -1300,6 +1607,19 @@ class PixArtAlphaPipeline(DiffusionPipeline):
                         )
                         # =========== Main Branch =========== #
                         
+                        # Optionally save intermediate predicted x0 images for each step
+                        if save_intermediates:
+                            try:
+                                z_mid = (x0_pred.to(dtype=self.vae.dtype)) / self.vae.config.scaling_factor
+                                img_mid = self.vae.decode(z_mid, return_dict=False)[0]
+                                if use_resolution_binning:
+                                    img_mid = self.resize_and_crop_tensor(img_mid, orig_width, orig_height)
+                                images_mid = self.image_processor.postprocess(img_mid, output_type="pil")
+                                for b_idx, im_mid in enumerate(images_mid):
+                                    im_mid.save(os.path.join(save_intermediates_dir, f"step_{i:04d}_img_{b_idx:02d}.png"))
+                            except Exception:
+                                pass
+
 
                         # call the callback, if provided 
                         if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
@@ -1358,40 +1678,33 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="results")
     parser.add_argument("--model_version", choices=["512", "1024"], default="512")
-    parser.add_argument("--input_config_path", type=str, default="./config.json") # input config file path
+    parser.add_argument("--input_config_path", type=str, default="./config.json")
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=67)
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Number of inference steps.")
+    # parser.add_argument("--ref_image_path", type=str, default="/home/jaesang/i2i/images/pattern.png", help="Path to reference image for CLIP guidance.")
+    # parser.add_argument("--clip_guidance_scale", type=float, default=5.0, help="Scale for CLIP image guidance loss.")
 
-    # Layout guidance
-    parser.add_argument("--enable_grounding_guidance",action="store_true", help="Enable layout grounding guidance.")
-    parser.add_argument("--layout_guidance_intervals",type=str,default="0-25", help="Layout guidance intervals as step ranges, e.g. '0-25,30-40'.")
-    
-    # Style guidance
-    parser.add_argument("--enable_clip_guidance",action="store_true", help="Enable CLIP image guidance.")
-    parser.add_argument("--clip_guidance_intervals",type=str,default="30-50", help="CLIP image guidance intervals as step ranges, e.g. '30-50'.")
-    parser.add_argument("--clip_guidance_scale", type=float, default=5.0, help="Scale for CLIP image guidance loss.")
-    parser.add_argument("--ref_image_path", type=str, default=None, help="Path to reference image for CLIP guidance.")
-
-    # Text guidance
-    parser.add_argument("--enable_text_guidance",action="store_true", help="Enable text guidance (CLIP/SigLIP).")
-    parser.add_argument("--text_guidance_intervals",type=str,default="35-50", help="Text guidance intervals as step ranges, e.g. '35-50'.")
-    parser.add_argument("--text_guidance_scale",type=float,default=10.0, help="Scale for CLIP/SigLIP text guidance loss.")
-    parser.add_argument("--text_guidance_text",type=str,default="Eyes closed", help="Text used for CLIP/SigLIP text guidance.")
-
-    # example commands
-    # python pipeline.py --enable_grounding_guidance --input_config_path "config/config.json" --layout_guidance_intervals "0-25"
-    # python pipeline.py --enable_clip_guidance --input_config_path "config/config.json" --clip_guidance_intervals "30-50" --ref_image_path "images/starry_night.png" --clip_guidance_scale 5.0
-    # python pipeline.py --enable_text_guidance --input_config_path "config/config.json" --text_guidance_intervals "35-50" --text_guidance_text "Eyes closed" --text_guidance_scale 10.0
     args = parser.parse_args()
 
-    def _parse_intervals(interval_str):
+    def _parse_intervals(interval_str_or_list):
         """
-        Parse a string like '0-25,30-40' or '10,20-30' into
-        a list of (start, end) integer tuples.
+        Parse a string like '0-25,30-40' or '10,20-30' into a list of (start, end) integer tuples.
+        If already a list of lists/tuples, coerce to list of tuples[int,int].
         """
+        if interval_str_or_list is None:
+            return None
+        if isinstance(interval_str_or_list, (list, tuple)):
+            out = []
+            for it in interval_str_or_list:
+                if isinstance(it, (list, tuple)) and len(it) == 2:
+                    out.append((int(it[0]), int(it[1])))
+            return out if len(out) > 0 else None
+        s = str(interval_str_or_list).strip()
+        if len(s) == 0:
+            return None
         intervals = []
-        for part in interval_str.split(","):
+        for part in s.split(","):
             part = part.strip()
             if not part:
                 continue
@@ -1402,19 +1715,33 @@ if __name__ == "__main__":
             else:
                 start = end = part
             intervals.append((int(start), int(end)))
-        return intervals
+        return intervals if len(intervals) > 0 else None
 
-    layout_intervals = (
-        _parse_intervals(args.layout_guidance_intervals) if args.layout_guidance_intervals else None
-    )
-    clip_intervals = (
-        _parse_intervals(args.clip_guidance_intervals) if args.clip_guidance_intervals else None
-    )
-    text_intervals = (
-        _parse_intervals(args.text_guidance_intervals) if args.text_guidance_intervals else None
-    )
+    def _as_list(x):
+        if x is None:
+            return None
+        return x if isinstance(x, (list, tuple)) else [x]
 
-
+    def _expand_regions(regions, needed_len, default_region=(0.0, 0.0, 1.0, 1.0)):
+        """
+        Ensure 'regions' is a list with length 'needed_len', padding/truncating as required.
+        """
+        if needed_len is None or needed_len <= 0:
+            return None
+        if regions is None:
+            return [list(default_region) for _ in range(needed_len)]
+        reg_list = list(regions) if isinstance(regions, (list, tuple)) else [regions]
+        # normalize each region to list[4]
+        norm_regs = []
+        for r in reg_list:
+            if isinstance(r, (list, tuple)) and len(r) == 4:
+                norm_regs.append([float(r[0]), float(r[1]), float(r[2]), float(r[3])])
+        if len(norm_regs) >= needed_len:
+            return norm_regs[:needed_len]
+        # pad
+        while len(norm_regs) < needed_len:
+            norm_regs.append(list(default_region))
+        return norm_regs
     # Set seed and device
     device = torch.device(f"cuda:{args.gpu_id}")
     seed_everything(args.seed)
@@ -1423,7 +1750,18 @@ if __name__ == "__main__":
     # Data loading
     with open(args.input_config_path, "r") as f:
         total_data_input = json.load(f)
-    num_total_data = len(total_data_input)
+    # Support optional global guidance config under "guidance" key
+    guidance_config = total_data_input.get("guidance", {}) if isinstance(total_data_input, dict) else {}
+    # Count only numeric keys as samples
+    sample_keys = []
+    if isinstance(total_data_input, dict):
+        for k in total_data_input.keys():
+            if str(k).isdigit():
+                sample_keys.append(str(k))
+        sample_keys = sorted(sample_keys, key=lambda x: int(x))
+        num_total_data = len(sample_keys)
+    else:
+        num_total_data = 0
     print(f"Will process {num_total_data} data.")
     # Create timestamped root directory: results/{timestamp}_seed{seed}
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1515,36 +1853,113 @@ if __name__ == "__main__":
             except Exception:
                 pass
 
-        # Generate sample
+        # Merge global guidance config with per-sample override
+        per_sample_guidance = data.get("guidance", {}) if isinstance(data, dict) else {}
+        gconf = {}
+        if isinstance(guidance_config, dict):
+            gconf.update(guidance_config)
+        if isinstance(per_sample_guidance, dict):
+            gconf.update(per_sample_guidance)
+
+        # Resolve enable flags
+        enable_grounding_guidance = bool(gconf.get("enable_grounding_guidance", False))
+        enable_clip_guidance = bool(gconf.get("enable_clip_guidance", True))
+        enable_text_guidance = bool(gconf.get("enable_text_guidance", False))
+        enable_edge_guidance = bool(gconf.get("enable_edge_guidance", False))
+
+        # Layout/grounding params
+        loss_scale = float(gconf.get("loss_scale", 10.0))
+        loss_threshold = float(gconf.get("loss_threshold", 0.00001))
+        gradient_weight = float(gconf.get("gradient_weight", 5.0))
+        global_update_max_iter_per_step = int(gconf.get("global_update_max_iter_per_step", 3))
+        layout_guidance_intervals = _parse_intervals(gconf.get("layout_guidance_intervals", None))
+
+        # CLIP/style guidance params
+        clip_guidance_scale = float(gconf.get("clip_guidance_scale", 5.0))
+        ref_image_paths = gconf.get("ref_image_paths", None)
+        ref_image_paths = _as_list(ref_image_paths) if ref_image_paths is not None else None
+        clip_guidance_regions = gconf.get("clip_guidance_regions", None)
+        clip_guidance_regions = _expand_regions(clip_guidance_regions, len(ref_image_paths))
+        clip_guidance_intervals = _parse_intervals(gconf.get("clip_guidance_intervals", None))
+
+        # Text guidance params
+        text_guidance_scale = float(gconf.get("text_guidance_scale", 2.0))
+        text_guidance_text = gconf.get("text_guidance_text", None)
+        text_list = _as_list(text_guidance_text) if text_guidance_text is not None else None
+        text_guidance_regions = gconf.get("text_guidance_regions", None)
+        text_guidance_regions = _expand_regions(text_guidance_regions, len(text_list) if text_list is not None else 0)
+        text_guidance_intervals = _parse_intervals(gconf.get("text_guidance_intervals", None))
+
+        # Edge guidance params
+        edge_guidance_scale = float(gconf.get("edge_guidance_scale", 2.0))
+        edge_preprocessor = str(gconf.get("edge_preprocessor", "hed"))
+        edge_guidance_images = gconf.get("edge_guidance_images", None)
+        edge_guidance_images = list(edge_guidance_images) if isinstance(edge_guidance_images, (list, tuple)) else edge_guidance_images
+        edge_guidance_intervals = _parse_intervals(gconf.get("edge_guidance_intervals", None))
+
+        # Save directories (per-sample subdirectories if provided)
+        save_intermediates_dir = gconf.get("save_intermediates_dir", None)
+        if isinstance(save_intermediates_dir, str) and len(save_intermediates_dir) > 0:
+            save_intermediates_dir = os.path.join(save_intermediates_dir, str(idx))
+        else:
+            save_intermediates_dir = None
+        save_edge_maps_dir = gconf.get("save_edge_maps_dir", os.path.join(sample_dir, "edge_maps"))
+        if isinstance(save_edge_maps_dir, str) and len(save_edge_maps_dir) > 0:
+            save_edge_maps_dir = os.path.join(save_edge_maps_dir, str(idx)) if not save_edge_maps_dir.startswith(sample_dir) else save_edge_maps_dir
+        save_target_edge_maps_dir = gconf.get("save_target_edge_maps_dir", os.path.join(sample_dir, "target_edge_maps"))
+        if isinstance(save_target_edge_maps_dir, str) and len(save_target_edge_maps_dir) > 0:
+            save_target_edge_maps_dir = os.path.join(save_target_edge_maps_dir, str(idx)) if not save_target_edge_maps_dir.startswith(sample_dir) else save_target_edge_maps_dir
+
+        # Generate sample with guidance from config
         pipe_kwargs = dict(
-            prompt=prompt,
-            width=original_width,
-            height=original_height,
-            latents=latent,
+            prompt=prompt, 
+            width=original_width, 
+            height=original_height, 
+            latents=latent, 
             num_inference_steps=args.num_inference_steps,
             # General Arguments
-            bbox_list=bbox_list,
-            phrases=phrases,
+            bbox_list=bbox_list, 
+            phrases=phrases, 
             phrases_idx=phrases_idx,
-            # Guidance configuration
-            ref_image_path=args.ref_image_path,
-            clip_guidance_scale=args.clip_guidance_scale,
-            text_guidance_text=args.text_guidance_text,
-            text_guidance_scale=args.text_guidance_scale,
-            enable_grounding_guidance=args.enable_grounding_guidance,
-            enable_clip_guidance=args.enable_clip_guidance,
-            enable_text_guidance=args.enable_text_guidance,
+            # Enable flags
+            enable_grounding_guidance=enable_grounding_guidance,
+            enable_clip_guidance=enable_clip_guidance,
+            enable_text_guidance=enable_text_guidance,
+            enable_edge_guidance=enable_edge_guidance,
+            # Layout params
+            loss_scale=loss_scale,
+            loss_threshold=loss_threshold,
+            gradient_weight=gradient_weight,
+            global_update_max_iter_per_step=global_update_max_iter_per_step,
+            # CLIP/style params
+            ref_image_paths=ref_image_paths,
+            clip_guidance_scale=clip_guidance_scale,
+            clip_guidance_regions=clip_guidance_regions,
+            # Text params
+            text_guidance_text=text_list,
+            text_guidance_scale=text_guidance_scale,
+            text_guidance_regions=text_guidance_regions,
+            # Edge params
+            edge_guidance_images=edge_guidance_images,
+            edge_guidance_scale=edge_guidance_scale,
+            edge_preprocessor=edge_preprocessor,
+            # Save dirs
+            save_intermediates_dir=save_intermediates_dir,
+            save_edge_maps_dir=save_edge_maps_dir,
+            save_target_edge_maps_dir=save_target_edge_maps_dir,
+            # Callback for trajectory thumbs
             callback=_traj_callback,
             callback_steps=1,
         )
-
         # Only override default intervals when explicitly provided
-        if layout_intervals is not None:
-            pipe_kwargs["layout_guidance_intervals"] = layout_intervals
-        if clip_intervals is not None:
-            pipe_kwargs["clip_guidance_intervals"] = clip_intervals
-        if text_intervals is not None:
-            pipe_kwargs["text_guidance_intervals"] = text_intervals
+        if layout_guidance_intervals is not None:
+            pipe_kwargs["layout_guidance_intervals"] = layout_guidance_intervals
+        if clip_guidance_intervals is not None:
+            pipe_kwargs["clip_guidance_intervals"] = clip_guidance_intervals
+        if text_guidance_intervals is not None:
+            pipe_kwargs["text_guidance_intervals"] = text_guidance_intervals
+        if edge_guidance_intervals is not None:
+            pipe_kwargs["edge_guidance_intervals"] = edge_guidance_intervals
 
         out = pipe(**pipe_kwargs)
 

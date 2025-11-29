@@ -1,0 +1,44 @@
+{
+    "guidance": {
+        // layout guidance
+        "enable_grounding_guidance": false,
+        "layout_guidance_intervals": "0-25",
+        "loss_scale": 10.0,
+        "loss_threshold": 0.00001,
+        "gradient_weight": 5.0,
+        "global_update_max_iter_per_step": 3,
+
+        // per-object edge guidance with per-object edge map image
+        // guidance image in order of objects specified in "phrases" in "config.json"
+        "enable_edge_guidance": false,
+        "edge_guidance_intervals": "0-30", 
+        "edge_guidance_scale": 2.0,
+        "edge_preprocessor": "hed",
+        "edge_guidance_images": ["/home/jaesang/i2i/sketch/dog_left.png", "/home/jaesang/i2i/sketch/cat_right.png"],
+
+        // style guidance with reference image
+        "enable_clip_guidance": true,
+        "clip_guidance_intervals": "35-50",
+        "clip_guidance_scale": 5.0,
+        "ref_image_paths": ["/home/jaesang/i2i/images/pattern.png"],
+        "clip_guidance_regions": [[0.0, 0.0, 1.0, 1.0]], // optional region-specific guidance
+
+        // text guidance with text prompt
+        "enable_text_guidance": false,
+        "text_guidance_intervals": "35-50",
+        "text_guidance_scale": 2.0,
+        "text_guidance_text": ["Eyes closed"],
+        "text_guidance_regions": [[0.15, 0.10, 0.40, 1.0]], // optional region-specific guidance
+
+        "save_intermediates_dir": "/home/jaesang/i2i/intermediates", // directory to save intermediate images
+        "save_edge_maps_dir": "/home/jaesang/i2i/edge_maps", // directory to save edge map images
+        "save_target_edge_maps_dir": "/home/jaesang/i2i/target_edge_maps" // directory to save target edge map images
+    },
+    "0": {
+        "prompt": "a dog and a bird.", // initial text prompt
+        "phrases": ["dog", "bird"], // objects to be guided in layout and edge guidance
+        "bboxes": [[[0.23, 0.58, 0.70, 0.94]], [[0.10, 0.10, 0.30, 0.30]]], // layout guidance bboxes of objects in order of "phrases"
+        "height": 512, // output image height
+        "width": 512 // output image width
+    }
+}
