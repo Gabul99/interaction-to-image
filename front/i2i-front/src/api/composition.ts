@@ -1,12 +1,43 @@
 import { type ObjectChip, type BoundingBox } from "../types";
 
 /**
- * API Endpoint: POST /api/composition/objects
+ * ============================================================================
+ * 백엔드 API 스펙: 객체 리스트 생성
+ * ============================================================================
  * 
- * 프롬프트를 서버로 전송하고 객체 리스트를 받아옵니다.
+ * 엔드포인트: POST /api/composition/objects
+ * 
+ * 기능:
+ * - 프롬프트를 받아 LLM을 이용하여 이미지 생성에 필요한 객체 리스트를 생성
+ * - 각 객체는 고유한 ID와 색상을 가져야 함
+ * 
+ * 요청 형식:
+ * {
+ *   "prompt": "a beautiful sunset over the ocean with a sailboat"
+ * }
+ * 
+ * 응답 형식:
+ * {
+ *   "objects": [
+ *     {
+ *       "id": "obj_1234567890_0",
+ *       "label": "Sunset",
+ *       "color": "#6366f1"
+ *     },
+ *     ...
+ *   ]
+ * }
+ * 
+ * 백엔드 구현 요구사항:
+ * 1. LLM (GPT-4, Claude 등)을 사용하여 프롬프트에서 객체 추출
+ * 2. 각 객체에 고유한 ID 생성 (형식: obj_{timestamp}_{index})
+ * 3. 각 객체에 색상 할당 (12가지 색상 중 선택)
+ * 4. 객체는 이미지 생성에 필요한 주요 요소들을 포함해야 함
  * 
  * @param prompt 이미지 생성 프롬프트
  * @returns 객체 리스트 (LLM이 생성한 객체 목록)
+ * 
+ * @see BACKEND_SPEC.md 섹션 1
  */
 export async function requestObjectList(prompt: string): Promise<ObjectChip[]> {
   console.log("[API] 객체 리스트 요청:", prompt);
@@ -84,15 +115,53 @@ export async function requestObjectList(prompt: string): Promise<ObjectChip[]> {
 }
 
 /**
- * API Endpoint: POST /api/composition/start
+ * ============================================================================
+ * 백엔드 API 스펙: 이미지 생성 시작
+ * ============================================================================
  * 
- * 객체 리스트 및 구도 설정을 서버로 전송하고 이미지 생성 세션을 시작합니다.
- * 서버는 세션 ID를 반환하며, 이후 WebSocket을 통해 이미지 스트림을 받을 수 있습니다.
+ * 엔드포인트: POST /api/composition/start
+ * 
+ * 기능:
+ * - 사용자가 설정한 구도 정보를 받아 이미지 생성을 시작
+ * - 구도 정보가 없을 수도 있음 (bboxes가 빈 배열이거나 없음)
+ * - 세션 ID와 WebSocket URL을 반환
+ * 
+ * 요청 형식:
+ * {
+ *   "prompt": "a beautiful sunset over the ocean with a sailboat",
+ *   "objects": [ { "id": "...", "label": "...", "color": "..." } ],
+ *   "bboxes": [
+ *     {
+ *       "objectId": "obj_123",
+ *       "x": 0.1,      // 상대 좌표 (0~1)
+ *       "y": 0.2,      // 상대 좌표 (0~1)
+ *       "width": 0.3,  // 상대 크기 (0~1)
+ *       "height": 0.4  // 상대 크기 (0~1)
+ *     }
+ *   ]
+ * }
+ * 
+ * 응답 형식:
+ * {
+ *   "sessionId": "session_1234567890",
+ *   "rootNodeId": "node_prompt_1234567890",
+ *   "websocketUrl": "ws://localhost:8000/ws/image-stream/session_1234567890"
+ * }
+ * 
+ * 백엔드 구현 요구사항:
+ * 1. 세션 ID 생성 및 관리
+ * 2. 프롬프트 노드 ID 생성 (rootNodeId)
+ * 3. WebSocket URL 생성 및 반환
+ * 4. 구도 정보가 없는 경우에도 처리 가능해야 함
+ * 5. 이미지 생성 파이프라인 초기화
+ * 6. WebSocket 연결 준비 (이미지 스트림 시작)
  * 
  * @param prompt 이미지 생성 프롬프트
  * @param objects 객체 리스트 (선택적, 구도 설정이 있는 경우)
  * @param bboxes 바운딩 박스 리스트 (선택적, 구도 설정이 있는 경우)
- * @returns 세션 정보 (sessionId, websocketUrl 등)
+ * @returns 세션 정보 (sessionId, rootNodeId, websocketUrl)
+ * 
+ * @see BACKEND_SPEC.md 섹션 2
  */
 export async function startImageGeneration(
   prompt: string,

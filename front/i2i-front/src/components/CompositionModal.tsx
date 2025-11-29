@@ -306,6 +306,18 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
         compositionState.bboxes.length > 0 ? compositionState.bboxes : undefined
       );
 
+      // TODO: 백엔드 연동
+      // 1. startImageGeneration API 호출하여 세션 생성 및 WebSocket URL 받기
+      // 2. WebSocket 연결하여 이미지 스트림 수신
+      // 3. 각 step 이미지를 받아서 addImageNodeToBranch로 노드 추가
+      //
+      // 현재는 시뮬레이션으로 처리
+      // 백엔드 연결 시:
+      //   const { sessionId, rootNodeId, websocketUrl } = await startImageGeneration(...);
+      //   if (websocketUrl) {
+      //     connectImageStream(sessionId, websocketUrl, onImageStep, onError, onComplete);
+      //   }
+
       // 프롬프트 노드 ID 가져오기 (세션 생성 후 약간의 지연 후 확인)
       setTimeout(() => {
         const state = useImageStore.getState();

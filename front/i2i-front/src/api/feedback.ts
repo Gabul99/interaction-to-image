@@ -1,12 +1,15 @@
 import { type FeedbackData } from "../types";
 
 /**
- * API Endpoint: POST /api/feedback
- *
- * 중간 피드백 턴에 여러 개의 피드백을 한번에 서버로 전송합니다.
- *
- * @param sessionId 세션 ID
- * @param feedbacks 피드백 데이터 배열
+ * ============================================================================
+ * 백엔드 API 스펙: 피드백 제출 (Deprecated - 브랜치 생성으로 대체됨)
+ * ============================================================================
+ * 
+ * 이 API는 브랜치 생성 API로 대체되었습니다.
+ * 새로운 코드에서는 브랜치 생성 API를 사용하세요.
+ * 
+ * @deprecated 브랜치 생성 API 사용 권장
+ * @see createBranch API
  */
 export async function submitFeedbacks(
   sessionId: string,

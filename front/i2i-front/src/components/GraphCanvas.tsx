@@ -306,7 +306,19 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       setBranchingModalVisible(false);
       setBranchingNodeId(null);
 
+      // TODO: 백엔드 연동
       // 브랜치 생성 후 이미지 스트림 시작
+      // 1. createBranch API에서 받은 websocketUrl로 WebSocket 연결
+      // 2. 서버에서 브랜치의 이미지 스트림 수신
+      // 3. 각 step 이미지를 받아서 addImageNodeToBranch로 노드 추가
+      //
+      // 현재는 시뮬레이션으로 처리
+      // 백엔드 연결 시:
+      //   const { websocketUrl } = await createBranchAPI(...);
+      //   if (websocketUrl) {
+      //     connectImageStream(sessionId, websocketUrl, onImageStep, onError, onComplete);
+      //   }
+
       if (currentGraphSession) {
         const { simulateBranchImageStream } = useImageStore.getState();
         simulateBranchImageStream(currentGraphSession.id, branchId);

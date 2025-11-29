@@ -1036,6 +1036,19 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   },
 
   // 브랜치 생성
+  // TODO: 백엔드 API 연동 필요
+  // 1. POST /api/branch/create 호출하여 브랜치 생성 요청
+  // 2. 피드백 정보를 서버로 전송
+  // 3. 서버에서 브랜치 ID와 WebSocket URL 반환
+  // 4. WebSocket 연결하여 브랜치의 이미지 스트림 수신
+  // 5. 각 step 이미지를 받아서 addImageNodeToBranch로 노드 추가
+  // 6. 여러 브랜치가 동시에 생성될 수 있으므로 병렬 처리 필요
+  //
+  // 현재는 프론트엔드에서만 브랜치를 생성하고, 이미지 스트림은 시뮬레이션으로 처리
+  // 백엔드 연결 시:
+  //   - import { createBranch as createBranchAPI } from '../api/branch';
+  //   - const { branchId, websocketUrl } = await createBranchAPI(sessionId, sourceNodeId, feedback);
+  //   - if (websocketUrl) { connectImageStream(sessionId, websocketUrl, ...); }
   createBranch: (
     sessionId: string,
     sourceNodeId: string,
@@ -1048,6 +1061,12 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     ) {
       return "";
     }
+
+    // TODO: 백엔드 API 호출
+    // const { branchId, websocketUrl } = await createBranchAPI(sessionId, sourceNodeId, feedback);
+    // if (websocketUrl) {
+    //   connectImageStream(sessionId, websocketUrl, onImageStep, onError, onComplete);
+    // }
 
     const branchId = `branch_${Date.now()}`;
     const newBranch: Branch = {
@@ -1188,6 +1207,18 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   },
 
   // 그래프 구조에 맞는 이미지 스트림 시뮬레이션
+  // TODO: 백엔드 WebSocket 연동 필요
+  // 1. startImageGeneration에서 받은 websocketUrl로 WebSocket 연결
+  // 2. 서버에서 image_step 이벤트를 받아서 addImageNodeToBranch로 노드 추가
+  // 3. generation_complete 이벤트를 받아서 생성 완료 처리
+  //
+  // 현재는 시뮬레이션으로 더미 이미지를 생성
+  // 백엔드 연결 시:
+  //   - const ws = connectImageStream(sessionId, websocketUrl,
+  //       (step) => { addImageNodeToBranch(sessionId, branchId, step.url, step.step); },
+  //       (error) => { console.error(error); },
+  //       () => { set({ isGenerating: false }); }
+  //     );
   simulateGraphImageStream: (
     sessionId: string,
     prompt: string,
@@ -1279,6 +1310,19 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   },
 
   // 브랜치용 이미지 스트림 시뮬레이션
+  // TODO: 백엔드 WebSocket 연동 필요
+  // 1. createBranch에서 받은 websocketUrl로 WebSocket 연결
+  // 2. 서버에서 image_step 이벤트를 받아서 addImageNodeToBranch로 노드 추가
+  // 3. generation_complete 이벤트를 받아서 생성 완료 처리
+  // 4. 여러 브랜치가 동시에 생성될 수 있으므로 각 브랜치마다 독립적인 WebSocket 연결 필요
+  //
+  // 현재는 시뮬레이션으로 더미 이미지를 생성
+  // 백엔드 연결 시:
+  //   - const ws = connectImageStream(sessionId, websocketUrl,
+  //       (step) => { addImageNodeToBranch(sessionId, branchId, step.url, step.step); },
+  //       (error) => { console.error(error); },
+  //       () => { console.log(`브랜치 생성 완료: ${branchId}`); }
+  //     );
   simulateBranchImageStream: (
     sessionId: string,
     branchId: string,
