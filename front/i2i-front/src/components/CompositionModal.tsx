@@ -5,6 +5,7 @@ import ObjectChipList from "./ObjectChipList";
 import CompositionCanvas from "./CompositionCanvas";
 import ImageViewer from "./ImageViewer";
 import { requestObjectList, startImageGeneration } from "../api/composition";
+import { API_BASE_URL } from "../config/api";
 
 const ModalOverlay = styled.div<{ visible: boolean }>`
   position: fixed;
@@ -253,7 +254,6 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
     removeBbox,
     clearComposition,
     createGraphSession,
-    simulateGraphImageStream,
   } = useImageStore();
 
   const [currentPrompt, setCurrentPrompt] = useState<string>("");
@@ -262,23 +262,35 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
   const placeholderRef = React.useRef<HTMLDivElement>(null);
 
   const handleSendPrompt = async (newPrompt: string) => {
-    console.log("프롬프트 전송:", newPrompt);
+    console.log("=".repeat(80));
+    console.log("[CompositionModal] ========== 객체 리스트 생성 요청 ==========");
+    console.log("[CompositionModal] 프롬프트:", newPrompt);
+    console.log("=".repeat(80));
+    
     setCurrentPrompt(newPrompt);
     setIsLoadingObjects(true);
     clearComposition();
 
     try {
       const objects = await requestObjectList(newPrompt);
+      console.log("[CompositionModal] 객체 리스트 수신:", objects);
       setObjectList(objects);
       setIsLoadingObjects(false);
     } catch (error) {
-      console.error("객체 리스트 요청 실패:", error);
+      console.error("[CompositionModal] 객체 리스트 요청 실패:", error);
       setIsLoadingObjects(false);
     }
   };
 
   const handleComplete = async () => {
-    if (!currentPrompt) return;
+    console.log("=".repeat(80));
+    console.log("[CompositionModal] ========== handleComplete 호출됨 ==========");
+    console.log("[CompositionModal] currentPrompt:", currentPrompt);
+    
+    if (!currentPrompt) {
+      console.error("[CompositionModal] 프롬프트가 없습니다!");
+      return;
+    }
 
     try {
       const bboxes =
@@ -292,43 +304,66 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
             }))
           : undefined;
 
-      await startImageGeneration(
+      // 백엔드로 전송할 데이터 로깅
+      console.log("=".repeat(80));
+      console.log("[CompositionModal] ========== 백엔드로 전송할 데이터 ==========");
+      console.log("[CompositionModal] 프롬프트:", currentPrompt);
+      console.log("[CompositionModal] 객체 리스트:", compositionState.objects);
+      console.log("[CompositionModal] 바운딩 박스:", bboxes);
+      console.log("[CompositionModal] API_BASE_URL:", API_BASE_URL);
+      console.log("=".repeat(80));
+
+      // 백엔드 API 호출하여 세션 생성 및 WebSocket URL 받기
+      console.log("[CompositionModal] startImageGeneration 호출 시작...");
+      const result = await startImageGeneration(
         currentPrompt,
         compositionState.objects.length > 0
           ? compositionState.objects
           : undefined,
         bboxes
       );
+      console.log("[CompositionModal] startImageGeneration 완료:", result);
 
-      // 그래프 세션 생성
+      const { sessionId, rootNodeId, websocketUrl } = result;
+
+      // 그래프 세션 생성 (백엔드에서 받은 sessionId와 rootNodeId 사용)
       const graphSessionId = createGraphSession(
         currentPrompt,
+        sessionId,
+        rootNodeId,
         compositionState.bboxes.length > 0 ? compositionState.bboxes : undefined
       );
 
-      // TODO: 백엔드 연동
-      // 1. startImageGeneration API 호출하여 세션 생성 및 WebSocket URL 받기
-      // 2. WebSocket 연결하여 이미지 스트림 수신
-      // 3. 각 step 이미지를 받아서 addImageNodeToBranch로 노드 추가
-      //
-      // 현재는 시뮬레이션으로 처리
-      // 백엔드 연결 시:
-      //   const { sessionId, rootNodeId, websocketUrl } = await startImageGeneration(...);
-      //   if (websocketUrl) {
-      //     connectImageStream(sessionId, websocketUrl, onImageStep, onError, onComplete);
-      //   }
+      console.log("[CompositionModal] 그래프 세션 생성 완료:", {
+        graphSessionId,
+        sessionId,
+        rootNodeId
+      });
 
-      // 프롬프트 노드 ID 가져오기 (세션 생성 후 약간의 지연 후 확인)
-      setTimeout(() => {
-        const state = useImageStore.getState();
-        const rootNodeId = state.currentGraphSession?.rootNodeId;
+      // WebSocket 연결 (websocketUrl이 있으면 연결)
+      console.log("[CompositionModal] WebSocket URL 확인:", websocketUrl);
+      if (!websocketUrl) {
+        console.error("=".repeat(80));
+        console.error("[CompositionModal] WebSocket URL이 없습니다!");
+        console.error("[CompositionModal] 백엔드 응답에서 websocketUrl을 받지 못했습니다.");
+        console.error("[CompositionModal] 백엔드 서버가 실행 중인지 확인하세요.");
+        console.error("[CompositionModal] SSH 터널링이 설정되어 있는지 확인하세요.");
+        console.error("=".repeat(80));
+        throw new Error("WebSocket URL이 없습니다. 백엔드 서버를 확인하세요.");
+      }
+      
+      console.log("[CompositionModal] WebSocket 연결 시작");
+      // imageStore의 startGenerationWithComposition을 사용하여 WebSocket 연결
+      // 이 함수는 ImageSession과 GraphSession 모두에 데이터를 추가합니다
+      const { startGenerationWithComposition } = useImageStore.getState();
+      startGenerationWithComposition(
+        currentPrompt,
+        sessionId,
+        websocketUrl,
+        compositionState.bboxes.length > 0 ? compositionState.bboxes : undefined
+      );
 
-        if (rootNodeId) {
-          // 더미 이미지 스트림 시뮬레이션 시작
-          simulateGraphImageStream(graphSessionId, currentPrompt, rootNodeId);
-        }
-      }, 100);
-
+      console.log("[CompositionModal] 세션 생성 완료:", { sessionId, rootNodeId, websocketUrl, graphSessionId });
       console.log("[CompositionModal] 그래프 세션 생성:", graphSessionId);
 
       if (onComplete) {
@@ -336,7 +371,16 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
       }
       onClose();
     } catch (error) {
-      console.error("[CompositionModal] 이미지 생성 시작 실패:", error);
+      console.error("=".repeat(80));
+      console.error("[CompositionModal] ========== 이미지 생성 시작 실패 ==========");
+      console.error("[CompositionModal] 에러:", error);
+      if (error instanceof Error) {
+        console.error("[CompositionModal] 에러 메시지:", error.message);
+        console.error("[CompositionModal] 에러 스택:", error.stack);
+      }
+      console.error("=".repeat(80));
+      // 사용자에게 알림 (선택적)
+      alert(`이미지 생성 시작 실패: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 

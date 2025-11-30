@@ -1,63 +1,16 @@
 import { type ImageStep } from "../stores/imageStore";
+import { API_BASE_URL } from "../config/api";
 
 /**
- * ============================================================================
- * 백엔드 WebSocket 스펙: 이미지 스트림 연결
- * ============================================================================
- * 
- * WebSocket URL 형식:
- * - 메인 브랜치: ws://{host}/ws/image-stream/{sessionId}
- * - 브랜치: ws://{host}/ws/image-stream/{sessionId}/{branchId}
- * 
- * 서버 → 클라이언트 메시지 형식:
- * 
- * 1. 이미지 스텝 (image_step):
- * {
- *   "type": "image_step",
- *   "sessionId": "session_1234567890",
- *   "branchId": "branch_1234567890",  // 브랜치인 경우만
- *   "nodeId": "node_image_1234567890_1",
- *   "parentNodeId": "node_prompt_1234567890",
- *   "step": 5,
- *   "totalSteps": 20,
- *   "imageUrl": "https://example.com/images/step_5.png",
- *   "imageData": "base64_encoded_image_data", // 또는 URL만 사용
- *   "timestamp": 1234567890
- * }
- * 
- * 2. 생성 완료 (generation_complete):
- * {
- *   "type": "generation_complete",
- *   "sessionId": "session_1234567890",
- *   "branchId": "branch_1234567890",  // 브랜치인 경우만
- *   "nodeId": "node_image_1234567890_20",
- *   "finalImageUrl": "https://example.com/images/final.png"
- * }
- * 
- * 3. 에러 (error):
- * {
- *   "type": "error",
- *   "code": "ERROR_CODE",
- *   "message": "에러 메시지"
- * }
- * 
- * 백엔드 구현 요구사항:
- * 1. 각 diffusion step마다 이미지를 생성하여 전송
- * 2. step은 현재 단계, totalSteps는 전체 단계 수
- * 3. nodeId는 각 이미지 노드의 고유 ID
- * 4. parentNodeId는 이전 노드의 ID (체인 구조)
- * 5. 이미지는 base64 인코딩 또는 URL로 전송 가능
- * 6. 여러 브랜치가 동시에 생성될 수 있으므로 병렬 처리 필요
- * 7. 각 브랜치는 독립적인 WebSocket 스트림을 가질 수 있음
+ * WebSocket 연결을 통해 이미지 스트림을 받습니다.
  * 
  * @param sessionId 세션 ID
- * @param websocketUrl WebSocket URL
+ * @param websocketUrl WebSocket URL (선택적, 없으면 기본 URL 사용)
  * @param onImageStep 이미지 스텝 수신 시 호출되는 콜백
  * @param onError 에러 발생 시 호출되는 콜백
  * @param onComplete 스트림 완료 시 호출되는 콜백
+ * @param onFeedbackRequest 피드백 요청 수신 시 호출되는 콜백 (선택적)
  * @returns WebSocket 연결 객체 (닫기 위해 사용)
- * 
- * @see BACKEND_SPEC.md 섹션 3
  */
 export function connectImageStream(
   sessionId: string,
@@ -69,36 +22,81 @@ export function connectImageStream(
   console.log("[WebSocket] 이미지 스트림 연결 시도:", websocketUrl);
 
   try {
-    // TODO: 실제 백엔드 연결 시 아래 주석을 해제하고 mockup 코드를 제거
-    /*
     const ws = new WebSocket(websocketUrl);
     
     ws.onopen = () => {
-      console.log("[WebSocket] 연결 성공");
-      // 세션 ID 전송 (필요한 경우)
-      ws.send(JSON.stringify({ type: 'subscribe', sessionId }));
+      console.log("[WebSocket] 연결 성공:", websocketUrl);
     };
     
     ws.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data);
+        // 메시지가 너무 크면 일부만 로그
+        const messagePreview = event.data.length > 200 ? event.data.substring(0, 200) + '...' : event.data;
+        console.log("[WebSocket] 원본 메시지 수신 (길이:", event.data.length, "):", messagePreview);
         
-        if (data.type === 'image_step') {
-          const imageStep: ImageStep = {
-            id: data.stepId,
-            url: data.imageUrl,
+        const data = JSON.parse(event.data);
+        console.log("[WebSocket] 파싱된 메시지:", data.type, data.step ? `step=${data.step}` : "", data.nodeId ? `nodeId=${data.nodeId}` : "");
+        
+        if (data.type === 'connected') {
+          // WebSocket 연결 확인 메시지
+          console.log("[WebSocket] 연결 확인됨:", data.sessionId);
+        } else if (data.type === 'image_step') {
+          console.log("[WebSocket] ✅ 이미지 스텝 메시지 수신:", {
             step: data.step,
+            nodeId: data.nodeId,
+            parentNodeId: data.parentNodeId,
+            imageUrlLength: data.imageUrl ? data.imageUrl.length : 0,
+            hasImageUrl: !!data.imageUrl,
+            imageUrlPreview: data.imageUrl ? data.imageUrl.substring(0, 50) + '...' : '없음'
+          });
+          
+          if (!data.imageUrl) {
+            console.error("[WebSocket] ❌ imageUrl이 없습니다!", data);
+            return;
+          }
+          
+          // 이미지 URL 처리 (상대 경로인 경우 API_BASE_URL 추가)
+          let imageUrl = data.imageUrl || data.imageData || '';
+          if (imageUrl && imageUrl.startsWith('/images/')) {
+            // 상대 경로인 경우 API_BASE_URL 추가
+            imageUrl = `${API_BASE_URL}${imageUrl}`;
+          }
+          
+          const imageStep: ImageStep = {
+            id: data.nodeId || data.stepId || `step_${data.step}`,
+            url: imageUrl,
+            step: data.step || 0,
             timestamp: data.timestamp || Date.now(),
-          };
+            // 그래프 구조를 위한 추가 정보
+            nodeId: data.nodeId,
+            parentNodeId: data.parentNodeId,
+            sessionId: data.sessionId,
+            branchId: data.branchId,
+          } as ImageStep & { nodeId?: string; parentNodeId?: string; sessionId?: string; branchId?: string };
+          
+          console.log("[WebSocket] 이미지 스텝 객체 생성 완료, 콜백 호출:", {
+            step: imageStep.step,
+            nodeId: imageStep.nodeId,
+            parentNodeId: imageStep.parentNodeId,
+            urlLength: imageStep.url.length
+          });
+          
           onImageStep(imageStep);
-        } else if (data.type === 'complete') {
+        } else if (data.type === 'generation_complete' || data.type === 'complete') {
+          console.log("[WebSocket] 생성 완료");
           onComplete();
           ws.close();
+        } else if (data.type === 'feedback_request') {
+          // 피드백 요청은 무시 (Branching 버튼으로 처리)
+          console.log("[WebSocket] 피드백 요청 수신 (무시됨, Branching 버튼 사용):", data.step, data.message);
         } else if (data.type === 'error') {
+          console.error("[WebSocket] 에러 메시지 수신:", data.message);
           onError(new Error(data.message || 'Unknown error'));
+        } else {
+          console.log("[WebSocket] 알 수 없는 메시지 타입:", data.type);
         }
       } catch (error) {
-        console.error("[WebSocket] 메시지 파싱 실패:", error);
+        console.error("[WebSocket] 메시지 파싱 실패:", error, "원본 데이터:", event.data.substring(0, 100));
         onError(error as Error);
       }
     };
@@ -113,15 +111,6 @@ export function connectImageStream(
     };
     
     return ws;
-    */
-
-    // ===== MOCKUP (백엔드 연결 전까지 사용) =====
-    // 실제 WebSocket 대신 시뮬레이션
-    // 이 부분은 imageStore의 simulateImageStream에서 처리되므로
-    // 여기서는 null을 반환하여 mockup 모드임을 표시
-    console.log("[WebSocket] Mockup 모드: 실제 WebSocket 연결 없음");
-    return null;
-    // ===== MOCKUP END =====
   } catch (error) {
     console.error("[WebSocket] 연결 실패:", error);
     onError(error as Error);

@@ -87,3 +87,10 @@ export interface Branch {
   feedback: FeedbackRecord[];
   nodes: string[]; // 이 브랜치에 속한 노드 ID들
 }
+
+export interface GraphSession {
+  id: string; // Session ID와 동일
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  branches: Branch[];
+}

@@ -14,6 +14,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import styled from "styled-components";
 import { useImageStore } from "../stores/imageStore";
+import { connectImageStream } from "../api/websocket";
 import PromptNode from "./PromptNode";
 import ImageNode from "./ImageNode";
 import BranchingModal from "./BranchingModal";
@@ -301,25 +302,58 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   }, []);
 
   const handleBranchCreated = useCallback(
-    (branchId: string) => {
-      console.log("브랜치 생성됨:", branchId);
+    (branchId: string, websocketUrl?: string) => {
+      console.log("브랜치 생성됨:", branchId, websocketUrl);
       setBranchingModalVisible(false);
       setBranchingNodeId(null);
 
-      // TODO: 백엔드 연동
-      // 브랜치 생성 후 이미지 스트림 시작
-      // 1. createBranch API에서 받은 websocketUrl로 WebSocket 연결
-      // 2. 서버에서 브랜치의 이미지 스트림 수신
-      // 3. 각 step 이미지를 받아서 addImageNodeToBranch로 노드 추가
-      //
-      // 현재는 시뮬레이션으로 처리
-      // 백엔드 연결 시:
-      //   const { websocketUrl } = await createBranchAPI(...);
-      //   if (websocketUrl) {
-      //     connectImageStream(sessionId, websocketUrl, onImageStep, onError, onComplete);
-      //   }
+      if (!currentGraphSession) return;
 
-      if (currentGraphSession) {
+      // 백엔드에서 websocketUrl을 받은 경우 실제 WebSocket 연결
+      if (websocketUrl) {
+        const { addImageNodeToBranch } = useImageStore.getState();
+        
+        const ws = connectImageStream(
+          currentGraphSession.id,
+          websocketUrl,
+          (imageStep) => {
+            // 브랜치의 이미지 스텝 수신
+            console.log("[GraphCanvas] 브랜치 이미지 스텝 수신:", imageStep.step);
+            
+            // 브랜치에 이미지 노드 추가
+            const branch = currentGraphSession.branches.find(b => b.id === branchId);
+            if (branch) {
+              const branchNodes = currentGraphSession.nodes.filter(n => branch.nodes.includes(n.id));
+              const lastNode = branchNodes[branchNodes.length - 1];
+              const parentNodeId = lastNode ? lastNode.id : branch.sourceNodeId;
+              
+              const siblings = branchNodes.filter(n => 
+                currentGraphSession.edges.find(e => e.target === n.id)?.source === parentNodeId
+              );
+              const xOffset = siblings.length * 220;
+              const position = {
+                x: lastNode ? lastNode.position.x + xOffset : 0,
+                y: lastNode ? lastNode.position.y + 280 : 0
+              };
+              
+              addImageNodeToBranch(
+                currentGraphSession.id,
+                branchId,
+                imageStep.url,
+                imageStep.step || 0,
+                position
+              );
+            }
+          },
+          (error) => {
+            console.error("[GraphCanvas] 브랜치 WebSocket 에러:", error);
+          },
+          () => {
+            console.log("[GraphCanvas] 브랜치 이미지 생성 완료");
+          }
+        );
+      } else {
+        // websocketUrl이 없는 경우 시뮬레이션으로 처리
         const { simulateBranchImageStream } = useImageStore.getState();
         simulateBranchImageStream(currentGraphSession.id, branchId);
       }

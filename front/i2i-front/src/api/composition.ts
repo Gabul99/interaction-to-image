@@ -1,4 +1,5 @@
 import { type ObjectChip, type BoundingBox } from "../types";
+import { API_BASE_URL, WS_BASE_URL } from "../config/api";
 
 /**
  * ============================================================================
@@ -43,9 +44,7 @@ export async function requestObjectList(prompt: string): Promise<ObjectChip[]> {
   console.log("[API] 객체 리스트 요청:", prompt);
 
   try {
-    // TODO: 실제 백엔드 연결 시 아래 주석을 해제하고 mockup 코드를 제거
-    /*
-    const response = await fetch('/api/composition/objects', {
+    const response = await fetch(`${API_BASE_URL}/api/composition/objects`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt }),
@@ -56,58 +55,10 @@ export async function requestObjectList(prompt: string): Promise<ObjectChip[]> {
     }
     
     const data = await response.json();
+    console.log("[API] 객체 리스트 수신:", data.objects);
     return data.objects;
-    */
 
-    // ===== MOCKUP (백엔드 연결 전까지 사용) =====
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    // 프롬프트에서 키워드를 추출하여 객체 리스트 생성 (시뮬레이션)
-    const keywords = prompt
-      .toLowerCase()
-      .split(/[,\s]+/)
-      .filter((word) => word.length > 2)
-      .slice(0, 5);
-
-    const defaultObjects = [
-      "person",
-      "car",
-      "tree",
-      "building",
-      "sky",
-      "mountain",
-      "water",
-      "animal",
-      "flower",
-      "object",
-    ];
-
-    const objectLabels = keywords.length > 0 
-      ? keywords 
-      : defaultObjects.slice(0, 3);
-
-    const colors = [
-      "#6366f1", // indigo
-      "#8b5cf6", // purple
-      "#ec4899", // pink
-      "#f43f5e", // rose
-      "#ef4444", // red
-      "#f59e0b", // amber
-      "#eab308", // yellow
-      "#84cc16", // lime
-      "#22c55e", // green
-      "#10b981", // emerald
-    ];
-
-    const objects: ObjectChip[] = objectLabels.map((label, index) => ({
-      id: `obj_${Date.now()}_${index}`,
-      label: label.charAt(0).toUpperCase() + label.slice(1),
-      color: colors[index % colors.length],
-    }));
-
-    console.log("[API] 객체 리스트 수신:", objects);
-    return objects;
-    // ===== MOCKUP END =====
+    // ===== MOCKUP (백엔드 연결 전까지 사용) - 제거됨 =====
   } catch (error) {
     console.error("[API] 객체 리스트 요청 실패:", error);
     throw error;
@@ -167,44 +118,85 @@ export async function startImageGeneration(
   prompt: string,
   objects?: ObjectChip[],
   bboxes?: Array<{ objectId: string; x: number; y: number; width: number; height: number }>
-): Promise<{ sessionId: string; websocketUrl?: string }> {
-  console.log("[API] 이미지 생성 시작 요청:", { prompt, objects, bboxes });
+): Promise<{ sessionId: string; rootNodeId?: string; websocketUrl?: string }> {
+  console.log("=".repeat(80));
+  console.log("[API] ========== 이미지 생성 시작 요청 ==========");
+  console.log("[API] 프롬프트:", prompt);
+  console.log("[API] 객체 리스트:", objects);
+  console.log("[API] 바운딩 박스:", bboxes);
+  console.log("[API] API_BASE_URL:", API_BASE_URL);
+  console.log("[API] 요청 URL:", `${API_BASE_URL}/api/composition/start`);
+  console.log("=".repeat(80));
 
   try {
-    // TODO: 실제 백엔드 연결 시 아래 주석을 해제하고 mockup 코드를 제거
-    /*
-    const response = await fetch('/api/composition/start', {
+    const requestBody = {
+      prompt,
+      objects: objects || [],
+      bboxes: bboxes || [],
+      width: 512,
+      height: 512,
+      num_inference_steps: 50,
+    };
+    console.log("[API] 요청 본문:", JSON.stringify(requestBody, null, 2));
+    
+    const response = await fetch(`${API_BASE_URL}/api/composition/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt,
-        objects: objects || [],
-        bboxes: bboxes || [],
-      }),
+      body: JSON.stringify(requestBody),
     });
     
+    console.log("[API] 응답 상태:", response.status, response.statusText);
+    
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      const errorText = await response.text();
+      console.error("[API] 에러 응답 본문:", errorText);
+      throw new Error(`HTTP error! status: ${response.status}, body: ${errorText}`);
     }
     
     const data = await response.json();
-    return {
+    console.log("=".repeat(80));
+    console.log("[API] ========== 이미지 생성 세션 시작 성공 ==========");
+    console.log("[API] 응답 데이터:", JSON.stringify(data, null, 2));
+    console.log("[API] sessionId:", data.sessionId);
+    console.log("[API] rootNodeId:", data.rootNodeId);
+    console.log("[API] websocketUrl (원본):", data.websocketUrl);
+    console.log("=".repeat(80));
+    
+    // WebSocket URL 변환 (SSH 터널링을 위해)
+    // 백엔드가 ws://localhost:8001을 반환하지만, 로컬에서는 ws://localhost:8003을 사용해야 함
+    let websocketUrl = data.websocketUrl;
+    if (!websocketUrl) {
+      console.error("[API] ⚠️⚠️⚠️ WebSocket URL이 응답에 없습니다! 백엔드 응답:", data);
+      // 기본 URL 사용
+      websocketUrl = `${WS_BASE_URL}/ws/image-stream/${data.sessionId}`;
+    } else if (websocketUrl.includes('localhost:8001')) {
+      // 원격 서버의 8001 포트를 로컬의 8003으로 변경 (SSH 터널링)
+      websocketUrl = websocketUrl.replace('localhost:8001', 'localhost:8003');
+      console.log("[API] WebSocket URL을 SSH 터널링 포트로 변경:", websocketUrl);
+    } else if (websocketUrl.includes('localhost:8000')) {
+      // 원격 서버의 8000 포트를 로컬의 8001로 변경 (SSH 터널링)
+      websocketUrl = websocketUrl.replace('localhost:8000', 'localhost:8001');
+      console.log("[API] WebSocket URL을 SSH 터널링 포트로 변경:", websocketUrl);
+    } else {
+      // 경로만 추출하여 config의 WS_BASE_URL 사용
+      try {
+        const urlObj = new URL(websocketUrl);
+        const path = urlObj.pathname;
+        websocketUrl = `${WS_BASE_URL}${path}`;
+        console.log("[API] WebSocket URL을 config 기반으로 변경:", websocketUrl);
+      } catch (e) {
+        console.warn("[API] WebSocket URL 파싱 실패, 원본 사용:", websocketUrl);
+      }
+    }
+    
+    const result = {
       sessionId: data.sessionId,
-      websocketUrl: data.websocketUrl, // 예: 'ws://localhost:8000/ws/image-stream/{sessionId}'
+      rootNodeId: data.rootNodeId,
+      websocketUrl: websocketUrl,
     };
-    */
-
-    // ===== MOCKUP (백엔드 연결 전까지 사용) =====
-    await new Promise((resolve) => setTimeout(resolve, 500));
     
-    const sessionId = `session_${Date.now()}`;
-    console.log("[API] 이미지 생성 세션 시작:", sessionId);
-    
-    return {
-      sessionId,
-      // websocketUrl: `ws://localhost:8000/ws/image-stream/${sessionId}`, // 실제 백엔드 연결 시 사용
-    };
-    // ===== MOCKUP END =====
+    console.log("[API] 반환할 결과:", result);
+    return result;
   } catch (error) {
     console.error("[API] 이미지 생성 시작 실패:", error);
     throw error;
