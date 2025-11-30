@@ -124,9 +124,12 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
 
   React.useEffect(() => {
     if (data?.imageUrl) {
+      console.log(`[ImageNode] 이미지 URL 업데이트: nodeId=${id}, imageUrl=${data.imageUrl.substring(0, 100)}, step=${data.step}`);
       setImageLoaded(false);
+    } else {
+      console.log(`[ImageNode] 이미지 URL 없음: nodeId=${id}, step=${data?.step}`);
     }
-  }, [data?.imageUrl]);
+  }, [data?.imageUrl, id, data?.step]);
 
   return (
     <>
@@ -144,7 +147,14 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
             <Image
               src={data.imageUrl}
               alt={`Step ${data.step || ""}`}
-              onLoad={() => setImageLoaded(true)}
+              onLoad={() => {
+                console.log(`[ImageNode] 이미지 로드 완료: nodeId=${id}, step=${data.step}`);
+                setImageLoaded(true);
+              }}
+              onError={(e) => {
+                console.error(`[ImageNode] 이미지 로드 실패: nodeId=${id}, step=${data.step}, url=${data.imageUrl}`);
+                console.error(e);
+              }}
               style={{ opacity: imageLoaded ? 1 : 0 }}
             />
           )}

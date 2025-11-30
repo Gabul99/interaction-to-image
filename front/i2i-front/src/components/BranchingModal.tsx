@@ -8,6 +8,7 @@ import {
   type InteractionData,
 } from "../types";
 import { useImageStore } from "../stores/imageStore";
+import { createBranch as createBranchAPI } from "../api/branch";
 import ImageViewer from "./ImageViewer";
 import InteractionCanvas from "./InteractionCanvas";
 import BboxOverlay from "./BboxOverlay";
@@ -496,7 +497,6 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     removeFeedbackFromCurrentList,
     clearCurrentFeedbackList,
     currentGraphSession,
-    createBranch,
     getNodeById,
   } = useImageStore();
 
@@ -653,21 +653,28 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     removeFeedbackFromCurrentList(feedbackId);
   };
 
-  const handleCreateBranch = () => {
+  const handleCreateBranch = async () => {
     if (!nodeId || !currentGraphSession || currentFeedbackList.length === 0) {
       return;
     }
 
-    const branchId = createBranch(
-      currentGraphSession.id,
-      nodeId,
-      currentFeedbackList
-    );
-    clearCurrentFeedbackList();
-    onClose();
+    try {
+      // 백엔드 API 호출
+      const { branchId, websocketUrl } = await createBranchAPI(
+        currentGraphSession.id,
+        nodeId,
+        currentFeedbackList
+      );
+      
+      clearCurrentFeedbackList();
+      onClose();
 
-    if (onBranchCreated) {
-      onBranchCreated(branchId);
+      if (onBranchCreated) {
+        onBranchCreated(branchId, websocketUrl);
+      }
+    } catch (error) {
+      console.error("[BranchingModal] 브랜치 생성 실패:", error);
+      alert("브랜치 생성에 실패했습니다. 다시 시도해주세요.");
     }
   };
 

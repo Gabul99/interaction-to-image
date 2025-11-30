@@ -1,4 +1,5 @@
 import { type FeedbackRecord } from "../types";
+import { API_BASE_URL } from "../config/api";
 
 /**
  * ============================================================================
@@ -95,53 +96,24 @@ export async function createBranch(
   });
 
   try {
-    // TODO: 실제 백엔드 연결 시 아래 주석을 해제하고 mockup 코드를 제거
-    /*
-    const formData = new FormData();
-    formData.append("sessionId", sessionId);
-    formData.append("sourceNodeId", sourceNodeId);
-    
-    // 피드백 배열을 JSON으로 직렬화
-    const feedbacksJson = feedback.map(f => {
-      const feedbackObj: any = {
+    const response = await fetch(`${API_BASE_URL}/api/branch/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        sourceNodeId,
+        feedback: feedback.map(f => ({
         id: f.id,
         area: f.area,
         type: f.type,
         timestamp: f.timestamp,
-      };
-      
-      if (f.text) feedbackObj.text = f.text;
-      if (f.imageUrl) feedbackObj.imageUrl = f.imageUrl;
-      if (f.point) {
-        feedbackObj.point = { x: f.point.x, y: f.point.y };
-      }
-      if (f.bbox) {
-        feedbackObj.bbox = {
-          x: f.bbox.x,
-          y: f.bbox.y,
-          width: f.bbox.width,
-          height: f.bbox.height,
-        };
-      }
-      if (f.bboxId) feedbackObj.bboxId = f.bboxId;
-      
-      return feedbackObj;
-    });
-    
-    formData.append("feedback", JSON.stringify(feedbacksJson));
-    
-    // 참조 이미지 파일이 있는 경우 별도로 추가
-    feedback.forEach((f, index) => {
-      if (f.imageUrl && f.imageUrl.startsWith('data:')) {
-        // base64 이미지를 파일로 변환하여 전송
-        const blob = dataURLtoBlob(f.imageUrl);
-        formData.append(`reference_image_${index}`, blob);
-      }
-    });
-    
-    const response = await fetch('/api/branch/create', {
-      method: 'POST',
-      body: formData,
+          text: f.text,
+          imageUrl: f.imageUrl,
+          point: f.point,
+          bbox: f.bbox,
+          bboxId: f.bboxId,
+        })),
+      }),
     });
     
     if (!response.ok) {
@@ -149,23 +121,11 @@ export async function createBranch(
     }
     
     const data = await response.json();
+    console.log("[API] 브랜치 생성 완료:", data);
     return {
       branchId: data.branchId,
       websocketUrl: data.websocketUrl,
     };
-    */
-
-    // ===== MOCKUP (백엔드 연결 전까지 사용) =====
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    
-    const branchId = `branch_${Date.now()}`;
-    console.log("[API] 브랜치 생성 완료 (Mockup):", branchId);
-    
-    return {
-      branchId,
-      // websocketUrl: `ws://localhost:8000/ws/image-stream/${sessionId}/${branchId}`, // 실제 백엔드 연결 시 사용
-    };
-    // ===== MOCKUP END =====
   } catch (error) {
     console.error("[API] 브랜치 생성 실패:", error);
     throw error;
