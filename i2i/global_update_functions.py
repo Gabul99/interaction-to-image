@@ -306,11 +306,13 @@ def ClipGuidanceUpdateFunc(pipe, latents, timestep, timestep_idx, denoiser_args,
             z = (pred_x0_latents.to(dtype=pipe.vae.dtype)) / pipe.vae.config.scaling_factor
             x0_image = pipe.vae.decode(z, return_dict=False)[0].float()
 
-            # Regions
+            # Regions: either single or list aligned to encoders
             clip_regions = clip_args.get("regions", None)
 
             for idx, enc in enumerate(encoders):
-                region_i = clip_regions[idx]
+                region_i = None
+                if clip_regions is not None and isinstance(clip_regions, (list, tuple)):
+                    region_i = clip_regions[idx]
 
                 x_for_ref = crop_tensor_by_bbox(x0_image, region_i) if region_i is not None else x0_image
                 # Style loss via Gram-matrix residual between predicted x0 and reference image
@@ -421,7 +423,9 @@ def TextGuidanceUpdateFunc(pipe, latents, timestep, timestep_idx, denoiser_args,
     total_norm = None
     if texts is not None and isinstance(texts, (list, tuple)) and len(texts) > 0:
         for idx, txt in enumerate(texts):
-            region_i = regions[idx]
+            region_i = None
+            if regions is not None and isinstance(regions, (list, tuple)):
+                region_i = regions[idx]
             x_for_txt = crop_tensor_by_bbox(x0_image, region_i) if region_i is not None else x0_image
             residual_i = pipe.clip_text_encoder.get_residual(x_for_txt, txt)
             norm_i = torch.linalg.norm(residual_i)
@@ -721,104 +725,3 @@ def EdgeGuidanceUpdateFunc(pipe, latents, timestep, timestep_idx, denoiser_args,
     torch.cuda.empty_cache()
 
     return latents.half(), edge_loss_val
-
-
-# def GlobalUpdateFunc(pipe, latents, timestep, timestep_idx, denoiser_args, loss_args):
-#     """
-#     Update latents during the denoising process with grounding loss.
-
-#     Args:
-#         pipe: The pipeline object with scheduling and model functions.
-#         latents: The latent tensor to update.
-#         timestep: Current timestep in the denoising schedule.
-#         timestep_idx: Index of the current timestep.
-#         denoiser_args: Dictionary containing denoiser parameters.
-#         loss_args: Dictionary containing loss-related parameters.
-
-#     Returns:
-#         Tuple: Updated latents and the computed loss.
-#     """
-#     # Clone and prepare latents
-#     latents = latents.clone().detach().float().requires_grad_(True)
-
-#     # Scale latent model input
-#     latent_model_input = torch.cat([latents] * 2)
-#     latent_model_input = pipe.scheduler.scale_model_input(latent_model_input, timestep)
-
-#     # Process timestep for transformer
-#     original_timestep = timestep
-#     current_timestep = pipe._timestep_process(timestep, latent_model_input.device, latent_model_input.shape[0])
-
-#     # Forward pass through the transformer to get attention maps
-#     noise_pred, attn_maps, _ = pipe.transformer(
-#         latent_model_input.half(),
-#         encoder_hidden_states=denoiser_args["prompt_embeds"],
-#         encoder_attention_mask=denoiser_args["prompt_attention_mask"],
-#         timestep=current_timestep,
-#         added_cond_kwargs=denoiser_args["added_cond_kwargs"],
-#         return_dict=False,
-#         return_attn_maps=True,  # GrounDiT flag
-#         is_object_branch=False,  # GrounDiT flag
-#     )
-#     # Apply classifier-free guidance if enabled
-#     if denoiser_args.get("do_cfg", False):
-#         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-#         noise_pred = noise_pred_uncond + denoiser_args.get("guidance_scale", 1.0) * (noise_pred_text - noise_pred_uncond)
-#     # Adjust noise prediction for learned sigma
-#     latent_channels = latents.shape[1]
-#     if pipe.transformer.config.out_channels // 2 == latent_channels:
-#         noise_pred = noise_pred.chunk(2, dim=1)[0]
-
-#     # Calculate the grounding loss (spatial)
-#     grounding_loss = aggregated_grounding_loss(
-#         attn_maps,
-#         bbox_list=loss_args["bbox_list"],
-#         object_positions=loss_args["phrases_idx"],
-#         latent_h=loss_args["height"] // (pipe.vae_scale_factor * 2),
-#         latent_w=loss_args["width"] // (pipe.vae_scale_factor * 2),
-#         pipe=pipe,
-#     )
-#     grounding_loss = grounding_loss * loss_args["loss_scale"]
-
-#     # Calculate CLIP image guidance loss independently (if enabled)
-#     clip_loss = None
-#     try:
-#         clip_guidance_scale = loss_args.get("clip_guidance_scale", 0.0)
-#     except Exception:
-#         clip_guidance_scale = 0.0
-
-#     if getattr(pipe, "clip_image_encoder", None) is not None and clip_guidance_scale is not None and clip_guidance_scale > 0.0:
-#         # Predict clean latents x0 from current latents and noise prediction (no scheduler advance)
-#         pred_x0_latents = pipe.predict_x0_noadvance(noise_pred, original_timestep, latents)
-#         # Decode predicted x0 to pixel space in [-1, 1]
-#         z = (pred_x0_latents.to(dtype=pipe.vae.dtype)) / pipe.vae.config.scaling_factor
-#         x0_image = pipe.vae.decode(z, return_dict=False)[0].float()
-#         # Style loss via Gram-matrix residual
-#         residual = pipe.clip_image_encoder.get_gram_matrix_residual(x0_image)
-#         style_norm = torch.linalg.norm(residual)
-#         clip_loss = style_norm * clip_guidance_scale
-
-#     print(clip_loss)
-#     # Update latents based on gradient if loss is non-zero
-#     total_loss = None
-#     if grounding_loss is not None:
-#         total_loss = grounding_loss if total_loss is None else total_loss + grounding_loss
-#     if clip_loss is not None:
-#         total_loss = clip_loss if total_loss is None else total_loss + clip_loss
-
-#     if total_loss is not None and (total_loss.requires_grad or (hasattr(total_loss, "grad_fn") and total_loss.grad_fn is not None)):
-#         grad_cond = torch.autograd.grad(total_loss.requires_grad_(True), [latents])[0]
-#         grad_cond = torch.nan_to_num(grad_cond)
-#         latents = latents - grad_cond * loss_args["gradient_weight"]
-#     elif timestep_idx < 5:
-#         grounding_loss = torch.tensor(10.0, device=latents.device, dtype=latents.dtype)
-
-#     # Cleanup
-#     del attn_maps
-#     del noise_pred
-#     if "x0_image" in locals():
-#         del x0_image
-#     torch.cuda.empty_cache()
-
-#     # Return grounding loss for controlling the update loop's early-stop behavior
-#     return latents.half(), grounding_loss

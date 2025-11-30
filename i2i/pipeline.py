@@ -1678,7 +1678,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="results")
     parser.add_argument("--model_version", choices=["512", "1024"], default="512")
-    parser.add_argument("--input_config_path", type=str, default="./config.json")
+    parser.add_argument("--input_config_path", type=str, default="config/config.json")
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=67)
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Number of inference steps.")
