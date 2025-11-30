@@ -1,6 +1,18 @@
 import { create } from "zustand";
-import { type FeedbackArea, type ObjectChip, type BoundingBox, type CompositionState, type FeedbackRecord, type GraphSession, type GraphNode, type GraphEdge, type Branch } from "../types";
+import {
+  type FeedbackArea,
+  type ObjectChip,
+  type BoundingBox,
+  type CompositionState,
+  type FeedbackRecord,
+  type GraphSession,
+  type GraphNode,
+  type GraphEdge,
+  type Branch,
+  type SketchLayer,
+} from "../types";
 import { connectImageStream, disconnectImageStream } from "../api/websocket";
+import { USE_MOCK_MODE } from "../config/api";
 
 export interface ImageStep {
   id: string; // 서버에서 보내준 UUID
@@ -70,7 +82,12 @@ export interface ImageStreamState {
   compositionState: CompositionState;
 
   // Actions
-  startGeneration: (prompt: string, sessionId: string, websocketUrl: string, interval?: number) => void;
+  startGeneration: (
+    prompt: string,
+    sessionId: string,
+    websocketUrl: string,
+    interval?: number
+  ) => void;
   setGenerationInterval: (interval: number) => void;
   addImageStep: (sessionId: string, imageStep: ImageStep) => void;
   completeSession: (sessionId: string) => void;
@@ -96,8 +113,15 @@ export interface ImageStreamState {
   updateBbox: (bboxId: string, updates: Partial<BoundingBox>) => void;
   removeBbox: (bboxId: string) => void;
   clearComposition: () => void;
-  startGenerationWithComposition: (prompt: string, sessionId: string, websocketUrl: string, bboxes?: BoundingBox[], interval?: number) => void;
-  
+  startGenerationWithComposition: (
+    prompt: string,
+    sessionId: string,
+    websocketUrl: string,
+    bboxes?: BoundingBox[],
+    sketchLayers?: SketchLayer[],
+    interval?: number
+  ) => void;
+
   // 현재 세션의 구도 BBOX 가져오기
   getCurrentCompositionBboxes: () => Array<{
     id: string;
@@ -121,12 +145,48 @@ export interface ImageStreamState {
   ) => void;
 
   // 그래프 세션 관련 액션
-  createGraphSession: (prompt: string, sessionId: string, rootNodeId?: string, bboxes?: BoundingBox[]) => string;
-  addImageNode: (sessionId: string, parentNodeId: string, imageUrl: string, step: number, position: { x: number; y: number }, nodeId?: string) => string; // nodeId 반환
-  addImageNodeToBranch: (sessionId: string, branchId: string, imageUrl: string, step: number, position?: { x: number; y: number }, nodeId?: string) => string; // nodeId 반환
-  updateNodePosition: (sessionId: string, nodeId: string, position: { x: number; y: number }) => void;
+  createGraphSession: (
+    prompt: string,
+    sessionId: string,
+    rootNodeId?: string,
+    bboxes?: BoundingBox[],
+    sketchLayers?: SketchLayer[]
+  ) => string;
+  addImageNode: (
+    sessionId: string,
+    parentNodeId: string,
+    imageUrl: string,
+    step: number,
+    position: { x: number; y: number },
+    nodeId?: string
+  ) => string; // nodeId 반환
+  addImageNodeToBranch: (
+    sessionId: string,
+    branchId: string,
+    imageUrl: string,
+    step: number,
+    position?: { x: number; y: number },
+    nodeId?: string
+  ) => string; // nodeId 반환
+  updateNodePosition: (
+    sessionId: string,
+    nodeId: string,
+    position: { x: number; y: number }
+  ) => void;
   selectNode: (nodeId: string | null) => void;
-  simulateBranchImageStream: (sessionId: string, branchId: string) => void;
+  simulateGraphImageStream: (
+    sessionId: string,
+    prompt: string,
+    rootNodeId: string,
+    interval?: number
+  ) => void;
+  simulateBranchImageStream: (
+    sessionId: string,
+    branchId: string,
+    interval?: number
+  ) => void;
+  // 현재 노드에서 루트까지 역방향으로 올라가며 브랜치 피드백 수집
+  getBranchFeedbacksForNode: (nodeId: string) => FeedbackRecord[];
 }
 
 export const useImageStore = create<ImageStreamState>((set, get) => ({
@@ -150,7 +210,12 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   },
 
   // 이미지 생성 시작
-  startGeneration: (prompt: string, sessionId: string, websocketUrl: string, interval?: number) => {
+  startGeneration: (
+    prompt: string,
+    sessionId: string,
+    websocketUrl: string,
+    interval?: number
+  ) => {
     const selectedInterval = interval || get().generationInterval;
 
     const newSession: ImageSession = {
@@ -171,96 +236,178 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       generationInterval: selectedInterval,
     });
 
+    // Mock 모드 체크
+    if (USE_MOCK_MODE) {
+      console.log("[ImageStore] Mock 모드: 시뮬레이션 시작");
+      // 그래프 세션이 있으면 그래프 시뮬레이션, 없으면 일반 시뮬레이션
+      const state = get();
+      if (
+        state.currentGraphSession &&
+        state.currentGraphSession.id === sessionId
+      ) {
+        const rootNodeId = state.currentGraphSession.nodes.find(
+          (n) => n.type === "prompt"
+        )?.id;
+        if (rootNodeId) {
+          get().simulateGraphImageStream(
+            sessionId,
+            prompt,
+            rootNodeId,
+            selectedInterval
+          );
+        }
+      } else {
+        get().simulateImageStream(sessionId, prompt, selectedInterval);
+      }
+      return;
+    }
+
     // 실제 WebSocket 연결
-    console.log("[ImageStore] WebSocket 연결 시작:", { sessionId, websocketUrl });
+    console.log("[ImageStore] WebSocket 연결 시작:", {
+      sessionId,
+      websocketUrl,
+    });
     const ws = connectImageStream(
       sessionId,
       websocketUrl,
       (imageStep) => {
         // 이미지 스텝 수신
         console.log("[ImageStore] 이미지 스텝 수신:", imageStep.step);
-        
+
         // ImageSession에 추가 (기존 방식)
         get().addImageStep(sessionId, imageStep);
-        
+
         // GraphSession에도 추가 (그래프 구조)
         const state = get();
-        if (state.currentGraphSession && state.currentGraphSession.id === sessionId) {
+        if (
+          state.currentGraphSession &&
+          state.currentGraphSession.id === sessionId
+        ) {
           // 백엔드에서 보낸 nodeId, parentNodeId 사용
           const nodeId = imageStep.nodeId || imageStep.id;
           const parentNodeId = imageStep.parentNodeId;
           const step = imageStep.step || 0;
           const branchId = imageStep.branchId;
-          
-          console.log(`[ImageStore] 그래프 노드 추가 시도: nodeId=${nodeId}, parentNodeId=${parentNodeId}, step=${step}, branchId=${branchId}`);
-          
+
+          console.log(
+            `[ImageStore] 그래프 노드 추가 시도: nodeId=${nodeId}, parentNodeId=${parentNodeId}, step=${step}, branchId=${branchId}`
+          );
+
           if (!parentNodeId) {
-            console.warn("[ImageStore] parentNodeId가 없습니다. 그래프 노드 추가 건너뜀");
-            return;
-          }
-          
-          // 부모 노드가 존재하는지 확인
-          const parentNode = state.currentGraphSession.nodes.find(n => n.id === parentNodeId);
-          if (!parentNode) {
-            console.warn(`[ImageStore] 부모 노드를 찾을 수 없습니다: ${parentNodeId}`);
-            console.log(`[ImageStore] 현재 노드 목록:`, state.currentGraphSession.nodes.map(n => n.id));
-            return;
-          }
-          
-          // 위치 계산 (메인 브랜치는 오른쪽으로 일렬로 배치, 브랜치는 아래로 배치)
-          const mainBranch = state.currentGraphSession.branches.find(b => !b.sourceNodeId);
-          const isMainBranch = !branchId && mainBranch;
-          
-          let position: { x: number; y: number };
-          
-          if (isMainBranch) {
-            // 메인 브랜치: 오른쪽으로 일렬로 배치
-            const mainBranchNodes = state.currentGraphSession.nodes.filter(
-              n => mainBranch.nodes.includes(n.id)
+            console.warn(
+              "[ImageStore] parentNodeId가 없습니다. 그래프 노드 추가 건너뜀"
             );
-            // step 순서대로 정렬
-            const sortedNodes = mainBranchNodes.sort((a, b) => (a.data.step || 0) - (b.data.step || 0));
-            const lastNode = sortedNodes[sortedNodes.length - 1];
-            
-            if (lastNode && lastNode.id !== parentNodeId) {
-              // 마지막 노드의 오른쪽에 배치
-              position = {
-                x: lastNode.position.x + 220, // 노드 간 간격
-                y: parentNode.position.y // 같은 y 좌표
-              };
+            return;
+          }
+
+          // 부모 노드가 존재하는지 확인
+          const parentNode = state.currentGraphSession.nodes.find(
+            (n) => n.id === parentNodeId
+          );
+          if (!parentNode) {
+            console.warn(
+              `[ImageStore] 부모 노드를 찾을 수 없습니다: ${parentNodeId}`
+            );
+            console.log(
+              `[ImageStore] 현재 노드 목록:`,
+              state.currentGraphSession.nodes.map((n) => n.id)
+            );
+            return;
+          }
+
+          // 위치 계산: 항상 오른쪽으로 grow (가로 배치)
+          const horizontalSpacing = 400; // 노드 너비(300px) + 간격(100px)
+          let position: { x: number; y: number };
+
+          if (!branchId) {
+            // 메인 브랜치: 마지막 노드의 오른쪽에 배치
+            const mainBranch = state.currentGraphSession.branches.find(
+              (b) => !b.sourceNodeId
+            );
+            if (mainBranch) {
+              const mainBranchNodes = state.currentGraphSession.nodes.filter(
+                (n) => mainBranch.nodes.includes(n.id)
+              );
+              // step 순서대로 정렬
+              const sortedNodes = mainBranchNodes.sort(
+                (a, b) => (a.data.step || 0) - (b.data.step || 0)
+              );
+              const lastNode = sortedNodes[sortedNodes.length - 1];
+
+              if (lastNode && lastNode.id !== parentNodeId) {
+                // 마지막 노드의 오른쪽에 배치
+                position = {
+                  x: lastNode.position.x + horizontalSpacing,
+                  y: lastNode.position.y, // 같은 y 좌표
+                };
+              } else {
+                // 첫 번째 노드 (프롬프트 노드 바로 오른쪽)
+                position = {
+                  x: parentNode.position.x + horizontalSpacing,
+                  y: parentNode.position.y,
+                };
+              }
             } else {
-              // 첫 번째 노드 (프롬프트 노드 바로 오른쪽)
+              // 메인 브랜치가 없으면 부모 노드의 오른쪽에 배치
               position = {
-                x: parentNode.position.x + 220,
-                y: parentNode.position.y
+                x: parentNode.position.x + horizontalSpacing,
+                y: parentNode.position.y,
               };
             }
           } else {
-            // 브랜치: 아래로 배치
-            const siblings = state.currentGraphSession.nodes.filter(
-              n => state.currentGraphSession?.edges.find(e => e.target === n.id)?.source === parentNodeId
+            // 브랜치: 마지막 노드의 오른쪽에 배치
+            const branch = state.currentGraphSession.branches.find(
+              (b) => b.id === branchId
             );
-            const xOffset = siblings.length * 220; // 노드 간 간격
-            position = {
-              x: parentNode.position.x + xOffset,
-              y: parentNode.position.y + 280
-            };
+            if (branch) {
+              const branchNodes = state.currentGraphSession.nodes.filter((n) =>
+                branch.nodes.includes(n.id)
+              );
+              const sortedNodes = branchNodes.sort(
+                (a, b) => (a.data.step || 0) - (b.data.step || 0)
+              );
+              const lastNode = sortedNodes[sortedNodes.length - 1];
+
+              if (lastNode) {
+                // 마지막 노드의 오른쪽에 배치
+                position = {
+                  x: lastNode.position.x + horizontalSpacing,
+                  y: lastNode.position.y,
+                };
+              } else {
+                // 첫 번째 노드: 소스 노드의 오른쪽에 배치
+                position = {
+                  x: parentNode.position.x + horizontalSpacing,
+                  y: parentNode.position.y,
+                };
+              }
+            } else {
+              // 브랜치를 찾을 수 없으면 부모 노드의 오른쪽에 배치
+              position = {
+                x: parentNode.position.x + horizontalSpacing,
+                y: parentNode.position.y,
+              };
+            }
           }
-          
+
           if (branchId) {
             // 브랜치 노드 추가 (백엔드에서 보낸 nodeId 사용)
-            console.log(`[ImageStore] 브랜치 노드 추가: nodeId=${nodeId}, branchId=${branchId}, imageUrl 길이=${imageStep.url.length}, step=${step}`);
+            console.log(
+              `[ImageStore] 브랜치 노드 추가: nodeId=${nodeId}, branchId=${branchId}, imageUrl 길이=${imageStep.url.length}, step=${step}`
+            );
             get().addImageNodeToBranch(
               sessionId,
               branchId,
-              imageStep.url,  // imageUrl 전달
+              imageStep.url, // imageUrl 전달
               step,
               position,
-              nodeId  // 백엔드에서 보낸 nodeId 사용
+              nodeId // 백엔드에서 보낸 nodeId 사용
             );
           } else {
             // 메인 브랜치 찾기
-            const mainBranch = state.currentGraphSession.branches.find(b => !b.sourceNodeId);
+            const mainBranch = state.currentGraphSession.branches.find(
+              (b) => !b.sourceNodeId
+            );
             if (mainBranch) {
               // 백엔드에서 보낸 nodeId를 사용하여 메인 브랜치에 노드 추가
               get().addImageNodeToBranch(
@@ -269,7 +416,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
                 imageStep.url,
                 step,
                 position,
-                nodeId  // 백엔드에서 보낸 nodeId 사용
+                nodeId // 백엔드에서 보낸 nodeId 사용
               );
             } else {
               // 일반 노드 추가 (백엔드에서 보낸 nodeId 사용)
@@ -279,7 +426,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
                 imageStep.url,
                 step,
                 position,
-                nodeId  // 백엔드에서 보낸 nodeId 사용
+                nodeId // 백엔드에서 보낸 nodeId 사용
               );
             }
           }
@@ -300,23 +447,26 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
 
     if (ws) {
       // WebSocket 연결 상태 확인
-      ws.addEventListener('open', () => {
+      ws.addEventListener("open", () => {
         console.log("[ImageStore] WebSocket 연결됨");
         set({ isConnected: true });
       });
-      
-      ws.addEventListener('close', () => {
+
+      ws.addEventListener("close", () => {
         console.log("[ImageStore] WebSocket 연결 종료");
         set({ isConnected: false });
       });
-      
-      ws.addEventListener('error', (error) => {
+
+      ws.addEventListener("error", (error) => {
         console.error("[ImageStore] WebSocket 에러 이벤트:", error);
         set({ isConnected: false });
       });
     }
 
-    set({ websocket: ws, isConnected: ws !== null && ws.readyState === WebSocket.OPEN });
+    set({
+      websocket: ws,
+      isConnected: ws !== null && ws.readyState === WebSocket.OPEN,
+    });
   },
 
   // 생성 간격 설정
@@ -487,13 +637,29 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   addObject: (label: string) => {
     const state = get();
     const colors = [
-      "#6366f1", "#8b5cf6", "#ec4899", "#f43f5e", "#ef4444",
-      "#f59e0b", "#eab308", "#84cc16", "#22c55e", "#10b981",
-      "#14b8a6", "#06b6d4", "#0ea5e9", "#3b82f6", "#6366f1",
+      "#6366f1",
+      "#8b5cf6",
+      "#ec4899",
+      "#f43f5e",
+      "#ef4444",
+      "#f59e0b",
+      "#eab308",
+      "#84cc16",
+      "#22c55e",
+      "#10b981",
+      "#14b8a6",
+      "#06b6d4",
+      "#0ea5e9",
+      "#3b82f6",
+      "#6366f1",
     ];
-    const existingColors = state.compositionState.objects.map(obj => obj.color);
-    const availableColor = colors.find(c => !existingColors.includes(c)) || colors[state.compositionState.objects.length % colors.length];
-    
+    const existingColors = state.compositionState.objects.map(
+      (obj) => obj.color
+    );
+    const availableColor =
+      colors.find((c) => !existingColors.includes(c)) ||
+      colors[state.compositionState.objects.length % colors.length];
+
     const newObject: ObjectChip = {
       id: `obj_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       label,
@@ -514,9 +680,16 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     set({
       compositionState: {
         ...state.compositionState,
-        objects: state.compositionState.objects.filter(obj => obj.id !== objectId),
-        bboxes: state.compositionState.bboxes.filter(bbox => bbox.objectId !== objectId),
-        selectedObjectId: state.compositionState.selectedObjectId === objectId ? null : state.compositionState.selectedObjectId,
+        objects: state.compositionState.objects.filter(
+          (obj) => obj.id !== objectId
+        ),
+        bboxes: state.compositionState.bboxes.filter(
+          (bbox) => bbox.objectId !== objectId
+        ),
+        selectedObjectId:
+          state.compositionState.selectedObjectId === objectId
+            ? null
+            : state.compositionState.selectedObjectId,
       },
     });
   },
@@ -552,7 +725,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     set({
       compositionState: {
         ...state.compositionState,
-        bboxes: state.compositionState.bboxes.map(bbox =>
+        bboxes: state.compositionState.bboxes.map((bbox) =>
           bbox.id === bboxId ? { ...bbox, ...updates } : bbox
         ),
       },
@@ -565,7 +738,9 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     set({
       compositionState: {
         ...state.compositionState,
-        bboxes: state.compositionState.bboxes.filter(bbox => bbox.id !== bboxId),
+        bboxes: state.compositionState.bboxes.filter(
+          (bbox) => bbox.id !== bboxId
+        ),
       },
     });
   },
@@ -583,7 +758,14 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   },
 
   // 구도 설정과 함께 생성 시작
-  startGenerationWithComposition: (prompt: string, sessionId: string, websocketUrl: string, bboxes?: BoundingBox[], interval?: number) => {
+  startGenerationWithComposition: (
+    prompt: string,
+    sessionId: string,
+    websocketUrl: string,
+    bboxes?: BoundingBox[],
+    sketchLayers?: SketchLayer[],
+    interval?: number
+  ) => {
     const state = get();
     // 구도 설정 완료 표시
     set({
@@ -592,8 +774,44 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         isConfigured: true,
       },
     });
-    
+
     const selectedInterval = interval || state.generationInterval;
+
+    // 그래프 세션이 있으면 루트 노드에 composition 데이터 저장
+    if (
+      state.currentGraphSession &&
+      state.currentGraphSession.id === sessionId
+    ) {
+      const rootNode = state.currentGraphSession.nodes.find(
+        (n) => n.type === "prompt"
+      );
+      if (rootNode) {
+        const updatedNodes = state.currentGraphSession.nodes.map((node) =>
+          node.id === rootNode.id
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  compositionData:
+                    (bboxes && bboxes.length > 0) ||
+                    (sketchLayers && sketchLayers.length > 0)
+                      ? {
+                          bboxes: bboxes || [],
+                          sketchLayers: sketchLayers || [],
+                        }
+                      : undefined,
+                },
+              }
+            : node
+        );
+        set({
+          currentGraphSession: {
+            ...state.currentGraphSession,
+            nodes: updatedNodes,
+          },
+        });
+      }
+    }
 
     const newSession: ImageSession = {
       id: sessionId,
@@ -602,7 +820,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       steps: [],
       isComplete: false,
       createdAt: Date.now(),
-      compositionBboxes: bboxes?.map(bbox => ({
+      compositionBboxes: bboxes?.map((bbox) => ({
         id: bbox.id,
         objectId: bbox.objectId,
         x: bbox.x,
@@ -622,38 +840,112 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       generationInterval: selectedInterval,
     });
 
+    // Mock 모드 체크
+    if (USE_MOCK_MODE) {
+      console.log("[ImageStore] Mock 모드: 시뮬레이션 시작 (구도 포함)");
+      // 그래프 세션이 있으면 그래프 시뮬레이션, 없으면 일반 시뮬레이션
+      const state = get();
+      if (
+        state.currentGraphSession &&
+        state.currentGraphSession.id === sessionId
+      ) {
+        const rootNodeId = state.currentGraphSession.nodes.find(
+          (n) => n.type === "prompt"
+        )?.id;
+        if (rootNodeId) {
+          get().simulateGraphImageStream(
+            sessionId,
+            prompt,
+            rootNodeId,
+            selectedInterval
+          );
+        }
+      } else {
+        get().simulateImageStream(sessionId, prompt, selectedInterval);
+      }
+      return;
+    }
+
     // 실제 WebSocket 연결
-    console.log("[ImageStore] WebSocket 연결 시작 (구도 포함):", { sessionId, websocketUrl });
+    console.log("[ImageStore] WebSocket 연결 시작 (구도 포함):", {
+      sessionId,
+      websocketUrl,
+    });
     const ws = connectImageStream(
       sessionId,
       websocketUrl,
       (imageStep) => {
         // 이미지 스텝 수신
-        console.log("[ImageStore] 이미지 스텝 수신 (구도 포함):", imageStep.step);
-        
+        console.log(
+          "[ImageStore] 이미지 스텝 수신 (구도 포함):",
+          imageStep.step
+        );
+
         // ImageSession에 추가
         get().addImageStep(sessionId, imageStep);
-        
+
         // GraphSession에도 추가 (위와 동일한 로직)
         const state = get();
-        if (state.currentGraphSession && state.currentGraphSession.id === sessionId) {
+        if (
+          state.currentGraphSession &&
+          state.currentGraphSession.id === sessionId
+        ) {
           const nodeId = imageStep.nodeId || imageStep.id;
           const parentNodeId = imageStep.parentNodeId;
           const step = imageStep.step;
           const branchId = imageStep.branchId;
-          
+
           if (parentNodeId) {
-            const parentNode = state.currentGraphSession.nodes.find(n => n.id === parentNodeId);
+            const parentNode = state.currentGraphSession.nodes.find(
+              (n) => n.id === parentNodeId
+            );
             if (parentNode) {
-              const siblings = state.currentGraphSession.nodes.filter(
-                n => state.currentGraphSession?.edges.find(e => e.target === n.id)?.source === parentNodeId
-              );
-              const xOffset = siblings.length * 220;
-              const position = {
-                x: parentNode.position.x + xOffset,
-                y: parentNode.position.y + 280
-              };
-              
+              // 오른쪽으로 grow: 마지막 노드의 오른쪽에 배치
+              const horizontalSpacing = 400; // 노드 너비(300px) + 간격(100px)
+
+              // 브랜치의 마지막 노드 찾기
+              let lastNode = null;
+              if (branchId) {
+                const branch = state.currentGraphSession.branches.find(
+                  (b) => b.id === branchId
+                );
+                if (branch) {
+                  const branchNodes = state.currentGraphSession.nodes.filter(
+                    (n) => branch.nodes.includes(n.id)
+                  );
+                  const sortedNodes = branchNodes.sort(
+                    (a, b) => (a.data.step || 0) - (b.data.step || 0)
+                  );
+                  lastNode = sortedNodes[sortedNodes.length - 1];
+                }
+              } else {
+                // 메인 브랜치
+                const mainBranch = state.currentGraphSession.branches.find(
+                  (b) => !b.sourceNodeId
+                );
+                if (mainBranch) {
+                  const mainBranchNodes =
+                    state.currentGraphSession.nodes.filter((n) =>
+                      mainBranch.nodes.includes(n.id)
+                    );
+                  const sortedNodes = mainBranchNodes.sort(
+                    (a, b) => (a.data.step || 0) - (b.data.step || 0)
+                  );
+                  lastNode = sortedNodes[sortedNodes.length - 1];
+                }
+              }
+
+              const position =
+                lastNode && lastNode.id !== parentNodeId
+                  ? {
+                      x: lastNode.position.x + horizontalSpacing,
+                      y: lastNode.position.y, // 같은 y 좌표 유지
+                    }
+                  : {
+                      x: parentNode.position.x + horizontalSpacing,
+                      y: parentNode.position.y, // 같은 y 좌표 유지
+                    };
+
               if (branchId) {
                 // 브랜치 노드 추가 (백엔드에서 보낸 nodeId 사용)
                 get().addImageNodeToBranch(
@@ -662,10 +954,12 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
                   imageStep.url,
                   step,
                   position,
-                  nodeId  // 백엔드에서 보낸 nodeId 사용
+                  nodeId // 백엔드에서 보낸 nodeId 사용
                 );
               } else {
-                const mainBranch = state.currentGraphSession.branches.find(b => !b.sourceNodeId);
+                const mainBranch = state.currentGraphSession.branches.find(
+                  (b) => !b.sourceNodeId
+                );
                 if (mainBranch) {
                   // 메인 브랜치에 노드 추가 (백엔드에서 보낸 nodeId 사용)
                   get().addImageNodeToBranch(
@@ -674,7 +968,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
                     imageStep.url,
                     step,
                     position,
-                    nodeId  // 백엔드에서 보낸 nodeId 사용
+                    nodeId // 백엔드에서 보낸 nodeId 사용
                   );
                 } else {
                   // 일반 노드 추가 (백엔드에서 보낸 nodeId 사용)
@@ -684,7 +978,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
                     imageStep.url,
                     step,
                     position,
-                    nodeId  // 백엔드에서 보낸 nodeId 사용
+                    nodeId // 백엔드에서 보낸 nodeId 사용
                   );
                 }
               }
@@ -707,25 +1001,28 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
 
     if (ws) {
       // WebSocket 연결 상태 확인
-      ws.addEventListener('open', () => {
+      ws.addEventListener("open", () => {
         console.log("[ImageStore] WebSocket 연결됨 (구도 포함)");
         set({ isConnected: true });
       });
-      
-      ws.addEventListener('close', () => {
+
+      ws.addEventListener("close", () => {
         console.log("[ImageStore] WebSocket 연결 종료 (구도 포함)");
         set({ isConnected: false });
       });
-      
-      ws.addEventListener('error', (error) => {
+
+      ws.addEventListener("error", (error) => {
         console.error("[ImageStore] WebSocket 에러 이벤트 (구도 포함):", error);
         set({ isConnected: false });
       });
     }
 
-    set({ websocket: ws, isConnected: ws !== null && ws.readyState === WebSocket.OPEN });
+    set({
+      websocket: ws,
+      isConnected: ws !== null && ws.readyState === WebSocket.OPEN,
+    });
   },
-  
+
   // 현재 세션의 구도 BBOX 가져오기
   getCurrentCompositionBboxes: () => {
     const state = get();
@@ -869,13 +1166,30 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   },
 
   // 그래프 세션 생성
-  createGraphSession: (prompt: string, sessionId: string, rootNodeId?: string, bboxes?: BoundingBox[]) => {
+  createGraphSession: (
+    prompt: string,
+    sessionId: string,
+    rootNodeId?: string,
+    bboxes?: BoundingBox[],
+    sketchLayers?: SketchLayer[]
+  ) => {
     // 프롬프트 노드 생성 (루트 노드)
     const promptNodeId = rootNodeId || `node_prompt_${Date.now()}`;
     const rootNode: GraphNode = {
       id: promptNodeId,
-      type: 'prompt',
-      data: { prompt },
+      type: "prompt",
+      data: {
+        prompt,
+        // Composition 데이터를 루트 노드에 저장
+        compositionData:
+          (bboxes && bboxes.length > 0) ||
+          (sketchLayers && sketchLayers.length > 0)
+            ? {
+                bboxes: bboxes || [],
+                sketchLayers: sketchLayers || [],
+              }
+            : undefined,
+      },
       position: { x: 400, y: 50 },
     };
 
@@ -896,14 +1210,24 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
 
     set({ currentGraphSession: graphSession });
     console.log("[ImageStore] 그래프 세션 생성:", sessionId);
-    
+
     return sessionId;
   },
 
   // 이미지 노드 추가 (nodeId는 선택적, 제공되지 않으면 자동 생성)
-  addImageNode: (sessionId: string, parentNodeId: string, imageUrl: string, step: number, position: { x: number; y: number }, nodeId?: string): string => {
+  addImageNode: (
+    sessionId: string,
+    parentNodeId: string,
+    imageUrl: string,
+    step: number,
+    position: { x: number; y: number },
+    nodeId?: string
+  ): string => {
     const state = get();
-    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) {
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
       console.warn("[ImageStore] 그래프 세션을 찾을 수 없습니다:", sessionId);
       return "";
     }
@@ -911,16 +1235,20 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     // 백엔드에서 보낸 nodeId를 사용하거나 새로 생성
     // 백엔드에서 보낸 nodeId 형식: node_image_{session_id}_{step_idx}
     const finalNodeId = nodeId || `node_image_${sessionId}_${step}`;
-    
+
     // 이미 존재하는 노드인지 확인
-    const existingNode = state.currentGraphSession.nodes.find(n => n.id === finalNodeId);
+    const existingNode = state.currentGraphSession.nodes.find(
+      (n) => n.id === finalNodeId
+    );
     if (existingNode) {
-      console.log(`[ImageStore] 노드가 이미 존재합니다: ${finalNodeId}, 이미지 URL 업데이트`);
+      console.log(
+        `[ImageStore] 노드가 이미 존재합니다: ${finalNodeId}, 이미지 URL 업데이트`
+      );
       // 기존 노드의 이미지 URL 업데이트
       set({
         currentGraphSession: {
           ...state.currentGraphSession,
-          nodes: state.currentGraphSession.nodes.map(n =>
+          nodes: state.currentGraphSession.nodes.map((n) =>
             n.id === finalNodeId ? { ...n, data: { ...n.data, imageUrl } } : n
           ),
         },
@@ -930,7 +1258,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
 
     const newNode: GraphNode = {
       id: finalNodeId,
-      type: 'image',
+      type: "image",
       data: { imageUrl, step, sessionId },
       position,
     };
@@ -940,90 +1268,118 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       id: edgeId,
       source: parentNodeId,
       target: finalNodeId,
-      type: 'default',
+      type: "default",
     };
 
     // 메인 브랜치 찾기 (sourceNodeId가 없는 브랜치)
-    const mainBranch = state.currentGraphSession.branches.find(b => !b.sourceNodeId);
-    
+    const mainBranch = state.currentGraphSession.branches.find(
+      (b) => !b.sourceNodeId
+    );
+
     set({
       currentGraphSession: {
         ...state.currentGraphSession,
         nodes: [...state.currentGraphSession.nodes, newNode],
         edges: [...state.currentGraphSession.edges, newEdge],
         branches: mainBranch
-          ? state.currentGraphSession.branches.map(b =>
-              b.id === mainBranch.id ? { ...b, nodes: [...b.nodes, finalNodeId] } : b
+          ? state.currentGraphSession.branches.map((b) =>
+              b.id === mainBranch.id
+                ? { ...b, nodes: [...b.nodes, finalNodeId] }
+                : b
             )
           : state.currentGraphSession.branches,
       },
     });
-    
-    console.log(`[ImageStore] 이미지 노드 추가: ${finalNodeId}, 부모: ${parentNodeId}, 스텝: ${step}`);
+
+    console.log(
+      `[ImageStore] 이미지 노드 추가: ${finalNodeId}, 부모: ${parentNodeId}, 스텝: ${step}`
+    );
     return finalNodeId;
   },
 
   // 브랜치에 이미지 노드 추가 (nodeId와 position은 선택적)
-  addImageNodeToBranch: (sessionId: string, branchId: string, imageUrl: string, step: number, position?: { x: number; y: number }, nodeId?: string): string => {
+  addImageNodeToBranch: (
+    sessionId: string,
+    branchId: string,
+    imageUrl: string,
+    step: number,
+    position?: { x: number; y: number },
+    nodeId?: string
+  ): string => {
     const state = get();
-    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) {
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
       console.warn("[ImageStore] 그래프 세션을 찾을 수 없습니다:", sessionId);
       return "";
     }
 
-    const branch = state.currentGraphSession.branches.find(b => b.id === branchId);
+    const branch = state.currentGraphSession.branches.find(
+      (b) => b.id === branchId
+    );
     if (!branch) {
       console.warn("[ImageStore] 브랜치를 찾을 수 없습니다:", branchId);
       return "";
     }
 
     // nodeId가 제공되지 않으면 자동 생성
-    const finalNodeId = nodeId || `node_image_${sessionId}_${step}_${Date.now()}`;
-    
+    const finalNodeId =
+      nodeId || `node_image_${sessionId}_${step}_${Date.now()}`;
+
     // position이 제공되지 않으면 자동 계산
     let finalPosition: { x: number; y: number };
     if (position) {
       finalPosition = position;
     } else {
       // 브랜치의 마지막 노드 찾기
-      const branchNodes = state.currentGraphSession.nodes.filter(n => branch.nodes.includes(n.id));
+      const branchNodes = state.currentGraphSession.nodes.filter((n) =>
+        branch.nodes.includes(n.id)
+      );
       const lastNode = branchNodes[branchNodes.length - 1];
-      
+
       if (lastNode) {
-        // 같은 부모의 형제 노드 개수 계산
-        const parentNodeId = branch.sourceNodeId;
-        const siblings = branchNodes.filter(n => {
-          const edge = state.currentGraphSession.edges.find(e => e.target === n.id);
-          return edge?.source === parentNodeId;
-        });
-        const xOffset = siblings.length * 220;
+        // 마지막 노드의 오른쪽에 배치 (가로로 grow)
+        const horizontalSpacing = 400; // 노드 너비(300px) + 간격(100px)
         finalPosition = {
-          x: lastNode.position.x + xOffset,
-          y: lastNode.position.y + 280
+          x: lastNode.position.x + horizontalSpacing,
+          y: lastNode.position.y, // 같은 y 좌표 유지
         };
       } else {
-        // 첫 번째 노드인 경우
-        const sourceNode = state.currentGraphSession.nodes.find(n => n.id === branch.sourceNodeId);
-        finalPosition = sourceNode 
-          ? { x: sourceNode.position.x, y: sourceNode.position.y + 280 }
+        // 첫 번째 노드인 경우: 소스 노드의 오른쪽에 배치
+        const sourceNode = state.currentGraphSession.nodes.find(
+          (n) => n.id === branch.sourceNodeId
+        );
+        const horizontalSpacing = 400;
+        finalPosition = sourceNode
+          ? {
+              x: sourceNode.position.x + horizontalSpacing,
+              y: sourceNode.position.y,
+            }
           : { x: 0, y: 0 };
       }
     }
 
     // 부모 노드 ID 찾기
-    const branchNodes = state.currentGraphSession.nodes.filter(n => branch.nodes.includes(n.id));
+    const branchNodes = state.currentGraphSession.nodes.filter((n) =>
+      branch.nodes.includes(n.id)
+    );
     const lastNode = branchNodes[branchNodes.length - 1];
     const parentNodeId = lastNode ? lastNode.id : branch.sourceNodeId;
 
     // 이미 존재하는 노드인지 확인
-    const existingNode = state.currentGraphSession.nodes.find(n => n.id === finalNodeId);
+    const existingNode = state.currentGraphSession.nodes.find(
+      (n) => n.id === finalNodeId
+    );
     if (existingNode) {
-      console.log(`[ImageStore] 노드가 이미 존재합니다: ${finalNodeId}, 이미지 URL 업데이트`);
+      console.log(
+        `[ImageStore] 노드가 이미 존재합니다: ${finalNodeId}, 이미지 URL 업데이트`
+      );
       // 기존 노드의 이미지 URL 업데이트
       set({
         currentGraphSession: {
           ...state.currentGraphSession,
-          nodes: state.currentGraphSession.nodes.map(n =>
+          nodes: state.currentGraphSession.nodes.map((n) =>
             n.id === finalNodeId ? { ...n, data: { ...n.data, imageUrl } } : n
           ),
         },
@@ -1031,10 +1387,14 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return finalNodeId;
     }
 
-    console.log(`[ImageStore] 새 노드 생성: nodeId=${finalNodeId}, imageUrl 길이=${imageUrl ? imageUrl.length : 0}, step=${step}`);
+    console.log(
+      `[ImageStore] 새 노드 생성: nodeId=${finalNodeId}, imageUrl 길이=${
+        imageUrl ? imageUrl.length : 0
+      }, step=${step}`
+    );
     const newNode: GraphNode = {
       id: finalNodeId,
-      type: 'image',
+      type: "image",
       data: { imageUrl, step, sessionId },
       position: finalPosition,
     };
@@ -1044,7 +1404,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       id: edgeId,
       source: parentNodeId,
       target: finalNodeId,
-      type: 'branch',
+      type: "branch",
       data: { branchId },
     };
 
@@ -1053,27 +1413,36 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         ...state.currentGraphSession,
         nodes: [...state.currentGraphSession.nodes, newNode],
         edges: [...state.currentGraphSession.edges, newEdge],
-        branches: state.currentGraphSession.branches.map(b =>
+        branches: state.currentGraphSession.branches.map((b) =>
           b.id === branchId ? { ...b, nodes: [...b.nodes, finalNodeId] } : b
         ),
       },
     });
-    
-    console.log(`[ImageStore] 브랜치 이미지 노드 추가: ${finalNodeId}, 브랜치: ${branchId}, 부모: ${parentNodeId}, 스텝: ${step}`);
+
+    console.log(
+      `[ImageStore] 브랜치 이미지 노드 추가: ${finalNodeId}, 브랜치: ${branchId}, 부모: ${parentNodeId}, 스텝: ${step}`
+    );
     return finalNodeId;
   },
 
   // 노드 위치 업데이트
-  updateNodePosition: (sessionId: string, nodeId: string, position: { x: number; y: number }) => {
+  updateNodePosition: (
+    sessionId: string,
+    nodeId: string,
+    position: { x: number; y: number }
+  ) => {
     const state = get();
-    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) {
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
       return;
     }
 
     set({
       currentGraphSession: {
         ...state.currentGraphSession,
-        nodes: state.currentGraphSession.nodes.map(node =>
+        nodes: state.currentGraphSession.nodes.map((node) =>
           node.id === nodeId ? { ...node, position } : node
         ),
       },
@@ -1085,9 +1454,241 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     set({ selectedNodeId: nodeId });
   },
 
-  // 브랜치 이미지 스트림 시뮬레이션
-  simulateBranchImageStream: (sessionId: string, branchId: string) => {
-    // TODO: 실제 WebSocket 연결로 대체
-    console.log("[ImageStore] 브랜치 이미지 스트림 시뮬레이션:", { sessionId, branchId });
+  // 그래프 구조에 맞는 이미지 스트림 시뮬레이션 (메인 브랜치)
+  simulateGraphImageStream: (
+    sessionId: string,
+    prompt: string,
+    rootNodeId: string,
+    interval?: number
+  ) => {
+    const totalSteps = 20;
+    const state = get();
+    const selectedInterval = interval || state.generationInterval;
+
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
+      return;
+    }
+
+    // 메인 브랜치 찾기 (rootNodeId를 sourceNodeId로 하는 브랜치)
+    const mainBranch = state.currentGraphSession.branches.find(
+      (b) => b.sourceNodeId === rootNodeId && b.id.startsWith("branch_main_")
+    );
+
+    if (!mainBranch) {
+      console.error("메인 브랜치를 찾을 수 없습니다:", rootNodeId);
+      return;
+    }
+
+    console.log(
+      `[ImageStore] 그래프 이미지 생성 시뮬레이션 시작: ${prompt} (Session: ${sessionId}, Root: ${rootNodeId}, Branch: ${mainBranch.id})`
+    );
+
+    let currentStep = 0;
+    let lastNodeId = rootNodeId;
+    let intervalId: NodeJS.Timeout | null = null;
+
+    const addNextStep = () => {
+      const currentState = get();
+
+      // 일시정지 상태이거나 세션이 완료된 경우 중단
+      if (
+        currentState.isPaused ||
+        !currentState.currentGraphSession ||
+        currentState.currentGraphSession.id !== sessionId
+      ) {
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        return;
+      }
+
+      // 간격에 따라 스텝 증가
+      currentStep += selectedInterval;
+
+      // 더미 이미지 URL 생성
+      const dummyImageUrl = `https://picsum.photos/512/512?random=${sessionId}&step=${currentStep}`;
+
+      // 메인 브랜치에 이미지 노드 추가
+      const newNodeId = get().addImageNodeToBranch(
+        sessionId,
+        mainBranch.id,
+        dummyImageUrl,
+        currentStep
+      );
+      if (newNodeId) {
+        lastNodeId = newNodeId;
+      }
+
+      console.log(
+        `[ImageStore] 이미지 스텝 추가: ${currentStep}/${totalSteps} (간격: ${selectedInterval})`
+      );
+
+      // 완료되면 인터벌 정리
+      if (currentStep >= totalSteps) {
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        set({ isGenerating: false });
+        console.log(`[ImageStore] 그래프 이미지 생성 완료: ${sessionId}`);
+      }
+    };
+
+    // 첫 번째 스텝 추가
+    addNextStep();
+
+    // 나머지 스텝들을 주기적으로 추가
+    intervalId = setInterval(addNextStep, 800); // 800ms마다 업데이트
+  },
+
+  // 브랜치용 이미지 스트림 시뮬레이션
+  simulateBranchImageStream: (
+    sessionId: string,
+    branchId: string,
+    interval?: number
+  ) => {
+    const totalSteps = 20;
+    const state = get();
+    const selectedInterval = interval || state.generationInterval;
+
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
+      return;
+    }
+
+    const branch = state.currentGraphSession.branches.find(
+      (b) => b.id === branchId
+    );
+    if (!branch) {
+      console.error("[ImageStore] 브랜치를 찾을 수 없습니다:", branchId);
+      return;
+    }
+
+    console.log(
+      `[ImageStore] 브랜치 이미지 생성 시뮬레이션 시작: (Session: ${sessionId}, Branch: ${branchId})`
+    );
+
+    let currentStep = 0;
+    let lastNodeId = branch.sourceNodeId;
+    let intervalId: NodeJS.Timeout | null = null;
+
+    const addNextStep = () => {
+      const currentState = get();
+
+      // 일시정지 상태이거나 세션이 완료된 경우 중단
+      if (
+        currentState.isPaused ||
+        !currentState.currentGraphSession ||
+        currentState.currentGraphSession.id !== sessionId
+      ) {
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        return;
+      }
+
+      // 브랜치가 여전히 존재하는지 확인
+      const currentBranch = currentState.currentGraphSession.branches.find(
+        (b) => b.id === branchId
+      );
+      if (!currentBranch) {
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        return;
+      }
+
+      // 간격에 따라 스텝 증가
+      currentStep += selectedInterval;
+
+      // 더미 이미지 URL 생성
+      const dummyImageUrl = `https://picsum.photos/512/512?random=${sessionId}&branch=${branchId}&step=${currentStep}`;
+
+      // 브랜치에 이미지 노드 추가
+      const newNodeId = get().addImageNodeToBranch(
+        sessionId,
+        branchId,
+        dummyImageUrl,
+        currentStep
+      );
+      if (newNodeId) {
+        lastNodeId = newNodeId;
+        console.log(
+          `[ImageStore] 브랜치 이미지 스텝 추가: ${currentStep}/${totalSteps} (간격: ${selectedInterval})`
+        );
+      }
+
+      // 완료되면 인터벌 정리
+      if (currentStep >= totalSteps) {
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        console.log(`[ImageStore] 브랜치 이미지 생성 완료: ${branchId}`);
+      }
+    };
+
+    // 첫 번째 스텝 추가
+    addNextStep();
+
+    // 나머지 스텝들을 주기적으로 추가
+    intervalId = setInterval(addNextStep, 800); // 800ms마다 업데이트
+  },
+
+  // 현재 노드에서 루트까지 역방향으로 올라가며 브랜치 피드백 수집
+  getBranchFeedbacksForNode: (nodeId: string): FeedbackRecord[] => {
+    const state = get();
+    if (!state.currentGraphSession) {
+      return [];
+    }
+
+    const { nodes, edges, branches } = state.currentGraphSession;
+    const allFeedbacks: FeedbackRecord[] = [];
+    const visitedBranches = new Set<string>();
+
+    // 현재 노드에서 시작하여 루트까지 역방향으로 경로 탐색
+    let currentNodeId: string | null = nodeId;
+    const visited = new Set<string>();
+
+    while (currentNodeId && !visited.has(currentNodeId)) {
+      visited.add(currentNodeId);
+
+      // 현재 노드로 들어오는 엣지 찾기 (부모 노드 찾기)
+      const incomingEdges = edges.filter((e) => e.target === currentNodeId);
+      if (incomingEdges.length === 0) {
+        // 루트 노드에 도달
+        break;
+      }
+
+      // 각 부모 엣지를 확인하여 브랜치 피드백 수집
+      for (const edge of incomingEdges) {
+        if (edge.type === "branch" && edge.data?.branchId) {
+          const branchId = edge.data.branchId;
+          if (!visitedBranches.has(branchId)) {
+            visitedBranches.add(branchId);
+
+            // 해당 브랜치의 피드백 찾기
+            const branch = branches.find((b) => b.id === branchId);
+            if (branch && branch.feedback) {
+              allFeedbacks.push(...branch.feedback);
+            }
+          }
+        }
+      }
+
+      // 첫 번째 부모 노드로 이동 (일반적으로 하나의 부모만 있음)
+      currentNodeId = incomingEdges[0]?.source || null;
+    }
+
+    // 시간순으로 정렬 (오래된 것부터)
+    return allFeedbacks.sort((a, b) => a.timestamp - b.timestamp);
   },
 }));

@@ -4,14 +4,14 @@ import {
   type FeedbackArea,
   type FeedbackType,
   type FeedbackRecord,
-  type ObjectChip,
-  type InteractionData,
+  type ToolMode,
+  type BoundingBox,
 } from "../types";
 import { useImageStore } from "../stores/imageStore";
 import { createBranch as createBranchAPI } from "../api/branch";
 import ImageViewer from "./ImageViewer";
-import InteractionCanvas from "./InteractionCanvas";
-import BboxOverlay from "./BboxOverlay";
+import UnifiedCanvas from "./UnifiedCanvas";
+import FloatingToolbox from "./FloatingToolbox";
 
 const ModalOverlay = styled.div<{ visible: boolean }>`
   position: fixed;
@@ -35,7 +35,7 @@ const ModalContainer = styled.div`
   border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
   width: 100%;
-  max-width: 1200px;
+  max-width: 1600px;
   max-height: 90vh;
   display: flex;
   flex-direction: column;
@@ -96,12 +96,13 @@ const TwoColumnLayout = styled.div`
   min-height: 0;
 `;
 
-const LeftColumn = styled.div`
+const ImageColumn = styled.div`
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 24px;
-  min-width: 0;
+  overflow-y: auto;
+  min-width: 0; /* flex item이 shrink될 수 있도록 */
 `;
 
 const RightColumn = styled.div`
@@ -144,7 +145,6 @@ const AddFeedbackButton = styled.button`
 
   &:disabled {
     opacity: 0.6;
-    cursor: not-allowed;
   }
 `;
 
@@ -471,8 +471,7 @@ interface BranchingModalProps {
   visible: boolean;
   nodeId: string | null;
   onClose: () => void;
-  onBranchCreated?: (branchId: string) => void;
-  objects?: ObjectChip[];
+  onBranchCreated?: (branchId: string, websocketUrl?: string) => void;
   compositionBboxes?: Array<{
     id: string;
     objectId: string;
@@ -482,6 +481,10 @@ interface BranchingModalProps {
     height: number;
     color: string;
   }>;
+  // Composition 데이터 (bboxes only)
+  compositionData?: {
+    bboxes: BoundingBox[];
+  } | null;
 }
 
 const BranchingModal: React.FC<BranchingModalProps> = ({
@@ -490,17 +493,67 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   onClose,
   onBranchCreated,
   compositionBboxes = [],
+  compositionData = null,
 }) => {
+  // BranchingModal이 열릴 때 composition data 로그 출력
+  React.useEffect(() => {
+    if (visible && nodeId) {
+      console.log("=".repeat(80));
+      console.log("[BranchingModal] BranchingModal 열림");
+      console.log("[BranchingModal] nodeId:", nodeId);
+      console.log("[BranchingModal] 받은 compositionData prop:", {
+        hasCompositionData: !!compositionData,
+        compositionData: compositionData
+          ? {
+              bboxesCount: compositionData.bboxes?.length || 0,
+              bboxes: compositionData.bboxes,
+            }
+          : null,
+      });
+      console.log("[BranchingModal] 받은 compositionBboxes prop:", {
+        count: compositionBboxes.length,
+        bboxes: compositionBboxes,
+      });
+      console.log("=".repeat(80));
+    }
+  }, [visible, nodeId, compositionData, compositionBboxes]);
+
+  // 모달이 닫힐 때 모든 temporary data 초기화
+  React.useEffect(() => {
+    if (!visible) {
+      setIsAddingFeedback(false);
+      setText("");
+      setImageFile(null);
+      setImagePreviewUrl(null);
+      setSelectedType("text");
+      setSelectedAreaType("full");
+      setSelectedPartialTool(null);
+      setSelectedArea("full");
+      setSelectedBboxIdForFeedback(null);
+      setBranchingBboxes([]);
+      setSelectedBboxId(null);
+      setToolMode("select");
+    }
+  }, [visible]);
+
   const {
     currentFeedbackList,
     addFeedbackToCurrentList,
     removeFeedbackFromCurrentList,
     clearCurrentFeedbackList,
     currentGraphSession,
-    getNodeById,
   } = useImageStore();
 
   const [isAddingFeedback, setIsAddingFeedback] = useState(false);
+  // 영역 선택: "full" (전체 이미지) 또는 "partial" (일부)
+  const [selectedAreaType, setSelectedAreaType] = useState<"full" | "partial">(
+    "full"
+  );
+  // 일부 선택 시 사용할 도구: "bbox"만 가능
+  const [selectedPartialTool, setSelectedPartialTool] = useState<"bbox" | null>(
+    null
+  );
+  // 실제 피드백 area (서버 전송용)
   const [selectedArea, setSelectedArea] = useState<FeedbackArea>("full");
   const [selectedType, setSelectedType] = useState<FeedbackType>("text");
   const [text, setText] = useState("");
@@ -509,20 +562,14 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   const [selectedBboxIdForFeedback, setSelectedBboxIdForFeedback] = useState<
     string | null
   >(null);
-  const [drawnBboxes, setDrawnBboxes] = useState<
-    Array<{
-      id: string;
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      color: string;
-    }>
-  >([]);
-  const [selectedPoint, setSelectedPoint] = useState<{
-    x: number;
-    y: number;
-  } | null>(null);
+
+  // 도구 모드
+  const [toolMode, setToolMode] = useState<ToolMode>("select");
+
+  // BBOX 관리 (피드백을 위한 새로운 BBOX만 저장)
+  const [branchingBboxes, setBranchingBboxes] = useState<BoundingBox[]>([]);
+  const [selectedBboxId, setSelectedBboxId] = useState<string | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const placeholderRef = useRef<HTMLDivElement>(null);
@@ -530,9 +577,9 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   // 노드에서 이미지 URL 가져오기
   const nodeImageUrl = React.useMemo(() => {
     if (!nodeId || !currentGraphSession) return null;
-    const node = getNodeById(currentGraphSession.id, nodeId);
+    const node = currentGraphSession.nodes.find((n) => n.id === nodeId);
     return node?.data?.imageUrl || null;
-  }, [nodeId, currentGraphSession, getNodeById]);
+  }, [nodeId, currentGraphSession]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -558,36 +605,22 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     }
   };
 
-  const handleInteraction = (data: InteractionData) => {
-    if (data.type === "bbox" && data.width && data.height) {
-      // BBOX 그리기
-      const bboxId = `bbox_${Date.now()}_${Math.random()
-        .toString(36)
-        .substr(2, 9)}`;
-      const newBbox = {
-        id: bboxId,
-        x: data.x,
-        y: data.y,
-        width: data.width,
-        height: data.height,
-        color: "#6366f1",
-      };
-      setDrawnBboxes([...drawnBboxes, newBbox]);
-      setSelectedBboxIdForFeedback(bboxId);
-      setSelectedArea("bbox");
-    } else if (data.type === "point") {
-      // 포인팅
-      setSelectedPoint({ x: data.x, y: data.y });
-      setSelectedArea("point");
-    }
-  };
-
   const handleBboxClick = (bboxId: string) => {
+    // 기존 피드백의 BBOX는 클릭해도 무시
+    const isExistingFeedbackBbox = existingFeedbackBboxes.some(
+      (bbox) => bbox.id === bboxId
+    );
+    if (isExistingFeedbackBbox) {
+      return;
+    }
+
+    setSelectedBboxId(bboxId);
     setSelectedBboxIdForFeedback(bboxId);
+    setSelectedPartialTool("bbox");
     setSelectedArea("bbox");
   };
 
-  const handleSubmitFeedback = () => {
+  const handleSubmitFeedback = async () => {
     const hasText = text.trim().length > 0;
     const hasImage = !!imageFile;
 
@@ -595,10 +628,9 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
       return;
     }
 
-    // 선택된 BBOX 찾기 (그린 BBOX 또는 compositionBboxes)
+    // 선택된 BBOX 찾기
     const selectedBbox = selectedBboxIdForFeedback
-      ? drawnBboxes.find((b) => b.id === selectedBboxIdForFeedback) ||
-        compositionBboxes.find((b) => b.id === selectedBboxIdForFeedback)
+      ? branchingBboxes.find((b) => b.id === selectedBboxIdForFeedback)
       : null;
 
     const feedback: FeedbackRecord = {
@@ -616,8 +648,6 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
               height: selectedBbox.height,
             }
           : undefined,
-      point:
-        selectedArea === "point" && selectedPoint ? selectedPoint : undefined,
       bboxId:
         selectedArea === "bbox"
           ? selectedBboxIdForFeedback || undefined
@@ -632,9 +662,10 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     setImageFile(null);
     setImagePreviewUrl(null);
     setSelectedType("text");
+    setSelectedAreaType("full");
+    setSelectedPartialTool(null);
     setSelectedArea("full");
     setSelectedBboxIdForFeedback(null);
-    setSelectedPoint(null);
     setIsAddingFeedback(false);
   };
 
@@ -643,9 +674,13 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     setImageFile(null);
     setImagePreviewUrl(null);
     setSelectedType("text");
+    setSelectedAreaType("full");
+    setSelectedPartialTool(null);
     setSelectedArea("full");
     setSelectedBboxIdForFeedback(null);
-    setSelectedPoint(null);
+    setBranchingBboxes([]);
+    setSelectedBboxId(null);
+    setToolMode("select");
     setIsAddingFeedback(false);
   };
 
@@ -665,7 +700,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
         nodeId,
         currentFeedbackList
       );
-      
+
       clearCurrentFeedbackList();
       onClose();
 
@@ -678,29 +713,102 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     }
   };
 
+  const handleStartAddingFeedback = () => {
+    setIsAddingFeedback(true);
+
+    // 이미 BBOX 피드백이 있으면 영역 지정 모드로 시작하고 바로 BBOX 그리기 모드로
+    if (hasBboxFeedback) {
+      setSelectedAreaType("partial");
+      setSelectedPartialTool("bbox");
+      setSelectedArea("bbox");
+      setToolMode("bbox");
+    } else if (hasFullFeedback) {
+      // 전체 이미지 피드백이 있으면 영역 지정 모드로 시작 (BBOX는 나중에 선택)
+      setSelectedAreaType("partial");
+      setSelectedPartialTool(null);
+      setSelectedArea("bbox");
+      setToolMode("select");
+    } else {
+      // 기본값은 전체 이미지
+      setSelectedAreaType("full");
+      setSelectedPartialTool(null);
+      setSelectedArea("full");
+      setToolMode("select");
+    }
+
+    // 초기화
+    setText("");
+    setImageFile(null);
+    setImagePreviewUrl(null);
+    setSelectedType("text");
+    setBranchingBboxes([]);
+    setSelectedBboxId(null);
+    setSelectedBboxIdForFeedback(null);
+  };
+
   const handleCancel = () => {
+    // 모든 temporary data 초기화
     clearCurrentFeedbackList();
     setIsAddingFeedback(false);
     setText("");
     setImageFile(null);
     setImagePreviewUrl(null);
     setSelectedType("text");
+    setSelectedAreaType("full");
+    setSelectedPartialTool(null);
     setSelectedArea("full");
     setSelectedBboxIdForFeedback(null);
+    setBranchingBboxes([]);
+    setSelectedBboxId(null);
+    setToolMode("select");
     onClose();
   };
 
   const canSubmit =
-    (text.trim().length > 0 || !!imageFile) &&
-    (selectedArea === "full" ||
-      (selectedArea === "bbox" && selectedBboxIdForFeedback !== null) ||
-      (selectedArea === "point" && selectedPoint !== null));
+    (selectedAreaType === "full" ||
+      (selectedAreaType === "partial" &&
+        selectedPartialTool === "bbox" &&
+        selectedBboxIdForFeedback !== null)) &&
+    (selectedType === "text" ? text.trim().length > 0 : imageFile !== null);
 
   const getAreaLabel = (area: FeedbackArea) => {
     if (area === "full") return "전체 이미지";
     if (area === "bbox") return "BBOX";
-    return "포인팅";
+    return "";
   };
+
+  // 전체 이미지 피드백이 있는지 확인
+  const hasFullFeedback = currentFeedbackList.some(
+    (feedback) => feedback.area === "full"
+  );
+
+  // 영역 지정 피드백이 있는지 확인
+  const hasBboxFeedback = currentFeedbackList.some(
+    (feedback) => feedback.area === "bbox"
+  );
+
+  // 이미 추가된 피드백의 BBOX들 추출
+  const existingFeedbackBboxes = React.useMemo(() => {
+    return currentFeedbackList
+      .filter(
+        (feedback) =>
+          feedback.area === "bbox" && feedback.bbox && feedback.bboxId
+      )
+      .map((feedback) => ({
+        id: feedback.bboxId!,
+        objectId: feedback.bboxId!,
+        x: feedback.bbox!.x,
+        y: feedback.bbox!.y,
+        width: feedback.bbox!.width,
+        height: feedback.bbox!.height,
+        color: "#8b5cf6", // 피드백 BBOX 색상
+      }));
+  }, [currentFeedbackList]);
+
+  // 표시할 모든 BBOX (기존 피드백 BBOX + 현재 작성 중인 BBOX)
+  const allBboxes = React.useMemo(() => {
+    return [...existingFeedbackBboxes, ...branchingBboxes];
+  }, [existingFeedbackBboxes, branchingBboxes]);
 
   if (!visible) return null;
 
@@ -714,7 +822,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
         <ModalContent>
           {nodeImageUrl ? (
             <TwoColumnLayout>
-              <LeftColumn>
+              <ImageColumn>
                 <ImageSection>
                   <SectionTitle>이미지</SectionTitle>
                   <ImageContainer>
@@ -724,164 +832,256 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                       imageRef={imageRef}
                       placeholderRef={placeholderRef}
                     />
-                    {/* 인터랙션 캔버스 */}
-                    {isAddingFeedback && (
-                      <InteractionCanvas
-                        toolMode={
-                          selectedArea === "bbox"
-                            ? "bbox"
-                            : selectedArea === "point"
-                            ? "point"
-                            : "none"
+                    {/* 통합 Canvas */}
+                    <UnifiedCanvas
+                      bboxes={allBboxes}
+                      selectedBboxId={selectedBboxId}
+                      onBboxClick={handleBboxClick}
+                      onAddBbox={(bbox) => {
+                        // 영역 지정 모드일 때만 BBOX 추가
+                        if (
+                          selectedAreaType === "partial" &&
+                          selectedPartialTool
+                        ) {
+                          const newBbox: BoundingBox = {
+                            id: `bbox_${Date.now()}_${Math.random()
+                              .toString(36)
+                              .substr(2, 9)}`,
+                            ...bbox,
+                            objectId: `bbox_${Date.now()}`,
+                            color: "#6366f1", // 기본 색상
+                          };
+                          setBranchingBboxes([...branchingBboxes, newBbox]);
+                          setSelectedBboxId(newBbox.id);
+                          setSelectedBboxIdForFeedback(newBbox.id);
+                          setSelectedPartialTool("bbox");
+                          setSelectedArea("bbox");
                         }
-                        disabled={selectedArea === "full"}
-                        onInteraction={handleInteraction}
-                        onClearSelection={() => {
+                      }}
+                      onUpdateBbox={(bboxId, updates) => {
+                        // 기존 피드백의 BBOX는 업데이트 불가
+                        const isExistingFeedbackBbox =
+                          existingFeedbackBboxes.some(
+                            (bbox) => bbox.id === bboxId
+                          );
+                        if (isExistingFeedbackBbox) {
+                          return;
+                        }
+
+                        setBranchingBboxes(
+                          branchingBboxes.map((bbox) =>
+                            bbox.id === bboxId ? { ...bbox, ...updates } : bbox
+                          )
+                        );
+                      }}
+                      onRemoveBbox={(bboxId) => {
+                        // 기존 피드백의 BBOX는 삭제 불가
+                        const isExistingFeedbackBbox =
+                          existingFeedbackBboxes.some(
+                            (bbox) => bbox.id === bboxId
+                          );
+                        if (isExistingFeedbackBbox) {
+                          return;
+                        }
+
+                        setBranchingBboxes(
+                          branchingBboxes.filter((bbox) => bbox.id !== bboxId)
+                        );
+                        if (selectedBboxId === bboxId) {
+                          setSelectedBboxId(null);
                           setSelectedBboxIdForFeedback(null);
-                          setSelectedPoint(null);
-                        }}
-                        imageRef={imageRef}
-                      />
-                    )}
-                    {/* 그린 BBOX 오버레이 */}
-                    {drawnBboxes.length > 0 && (
-                      <BboxOverlay
-                        bboxes={drawnBboxes.map((bbox) => ({
-                          id: bbox.id,
-                          objectId: "",
-                          x: bbox.x,
-                          y: bbox.y,
-                          width: bbox.width,
-                          height: bbox.height,
-                          color: bbox.color,
-                        }))}
-                        objects={[]}
-                        imageRef={imageRef}
-                        selectedBboxId={selectedBboxIdForFeedback}
-                        onBboxClick={handleBboxClick}
-                        onClearSelection={() =>
-                          setSelectedBboxIdForFeedback(null)
                         }
-                      />
-                    )}
+                      }}
+                      toolMode={toolMode}
+                      editable={isAddingFeedback}
+                      disabled={
+                        !isAddingFeedback || selectedAreaType === "full"
+                      }
+                      onClearSelection={() => {
+                        setSelectedBboxId(null);
+                        setSelectedBboxIdForFeedback(null);
+                      }}
+                      imageRef={imageRef}
+                      placeholderRef={placeholderRef}
+                    />
+                    {/* Floating Toolbox - 일부 선택 시에만 표시 */}
+                    {isAddingFeedback &&
+                      selectedAreaType === "partial" &&
+                      selectedPartialTool && (
+                        <FloatingToolbox
+                          toolMode={toolMode}
+                          onToolChange={setToolMode}
+                          disabled={false}
+                          enabledTools={["select", "bbox"]}
+                          requireObject={false}
+                        />
+                      )}
                   </ImageContainer>
                 </ImageSection>
-              </LeftColumn>
+              </ImageColumn>
               <RightColumn>
-                <AddFeedbackButton onClick={() => setIsAddingFeedback(true)}>
+                <AddFeedbackButton
+                  onClick={handleStartAddingFeedback}
+                  disabled={hasFullFeedback}
+                  title={
+                    hasFullFeedback
+                      ? "전체 이미지 피드백이 하나 있습니다. 삭제 후 추가할 수 있습니다."
+                      : undefined
+                  }
+                >
                   + 피드백 추가하기
                 </AddFeedbackButton>
 
                 {isAddingFeedback && (
                   <AddFeedbackForm>
+                    {/* 첫 번째 선택: 전체 이미지 vs 일부 */}
                     <SectionTitle>영역 선택</SectionTitle>
                     <OptionGroup>
                       <OptionButton
-                        selected={selectedArea === "full"}
+                        selected={selectedAreaType === "full"}
                         onClick={() => {
+                          setSelectedAreaType("full");
+                          setSelectedPartialTool(null);
                           setSelectedArea("full");
                           setSelectedBboxIdForFeedback(null);
-                          setSelectedPoint(null);
+                          // 전체 이미지 선택 시 BBOX 초기화
+                          setBranchingBboxes([]);
+                          setSelectedBboxId(null);
+                          setToolMode("select");
                         }}
+                        disabled={hasBboxFeedback || hasFullFeedback}
+                        title={
+                          hasBboxFeedback
+                            ? "이미 영역 지정 피드백이 있어서 전체 이미지 피드백을 추가할 수 없습니다"
+                            : hasFullFeedback
+                            ? "이미 전체 이미지 피드백이 있습니다. 하나만 추가할 수 있습니다"
+                            : undefined
+                        }
                       >
                         전체 이미지
                       </OptionButton>
                       <OptionButton
-                        selected={selectedArea === "bbox"}
-                        onClick={() => setSelectedArea("bbox")}
-                      >
-                        BBOX
-                      </OptionButton>
-                      <OptionButton
-                        selected={selectedArea === "point"}
+                        selected={selectedAreaType === "partial"}
                         onClick={() => {
-                          setSelectedArea("point");
+                          setSelectedAreaType("partial");
+                          setSelectedPartialTool(null);
+                          // 일부 선택 시 초기화
+                          setBranchingBboxes([]);
+                          setSelectedBboxId(null);
                           setSelectedBboxIdForFeedback(null);
+                          setToolMode("select");
                         }}
+                        disabled={hasFullFeedback}
+                        title={
+                          hasFullFeedback
+                            ? "이미 전체 이미지 피드백이 있어서 영역 지정 피드백을 추가할 수 없습니다"
+                            : undefined
+                        }
                       >
-                        포인팅
+                        영역 지정
                       </OptionButton>
                     </OptionGroup>
 
-                    {selectedArea === "bbox" && (
-                      <InstructionText>
-                        {selectedBboxIdForFeedback
-                          ? `BBOX 선택됨`
-                          : "이미지 위에서 BBOX를 그려주세요."}
-                      </InstructionText>
-                    )}
-                    {selectedArea === "point" && (
-                      <InstructionText>
-                        {selectedPoint
-                          ? `포인팅 위치: (${Math.round(
-                              selectedPoint.x * 100
-                            )}%, ${Math.round(selectedPoint.y * 100)}%)`
-                          : "이미지 위에서 클릭하여 포인팅하세요."}
-                      </InstructionText>
-                    )}
-
-                    <SectionTitle>피드백 방식</SectionTitle>
-                    <OptionGroup>
-                      <OptionButton
-                        selected={selectedType === "text"}
-                        onClick={() => setSelectedType("text")}
-                      >
-                        텍스트
-                      </OptionButton>
-                      <OptionButton
-                        selected={selectedType === "image"}
-                        onClick={() => setSelectedType("image")}
-                      >
-                        이미지
-                      </OptionButton>
-                    </OptionGroup>
-
-                    {selectedType === "text" && (
-                      <TextArea
-                        placeholder="피드백을 입력하세요..."
-                        value={text}
-                        onChange={(e) => setText(e.target.value)}
-                      />
-                    )}
-
-                    {selectedType === "image" && (
+                    {/* 일부 선택 시: BBOX 그리기 */}
+                    {selectedAreaType === "partial" && !selectedPartialTool && (
                       <>
-                        <FileInput
-                          ref={fileInputRef}
-                          type="file"
-                          accept="image/*"
-                          onChange={handleFileSelect}
-                        />
-                        {!imageFile ? (
-                          <FileUploadButton onClick={handleFileUploadClick}>
-                            이미지 선택
-                          </FileUploadButton>
-                        ) : (
-                          <ImagePreview>
-                            <PreviewImage
-                              src={imagePreviewUrl || ""}
-                              alt="Preview"
-                            />
-                            <RemoveImageButton onClick={handleRemoveImage}>
-                              제거
-                            </RemoveImageButton>
-                          </ImagePreview>
-                        )}
+                        <InstructionText>
+                          이미지 위에서 BBOX를 그려주세요.
+                        </InstructionText>
+                        <OptionButton
+                          selected={false}
+                          onClick={() => {
+                            setSelectedPartialTool("bbox");
+                            setSelectedArea("bbox");
+                            setToolMode("bbox");
+                          }}
+                        >
+                          BBOX 그리기 시작
+                        </OptionButton>
                       </>
                     )}
 
-                    <FormButtonGroup>
-                      <FormButton variant="cancel" onClick={handleCancelAdd}>
-                        취소
-                      </FormButton>
-                      <FormButton
-                        variant="submit"
-                        onClick={handleSubmitFeedback}
-                        disabled={!canSubmit}
-                      >
-                        저장
-                      </FormButton>
-                    </FormButtonGroup>
+                    {/* 도구 선택 후: 피드백 입력 영역 표시 */}
+                    {(selectedAreaType === "full" ||
+                      (selectedAreaType === "partial" &&
+                        selectedPartialTool === "bbox" &&
+                        selectedBboxIdForFeedback !== null)) && (
+                      <>
+                        {selectedAreaType === "partial" && (
+                          <InstructionText>
+                            {selectedPartialTool === "bbox" &&
+                              selectedBboxIdForFeedback &&
+                              "BBOX 선택됨"}
+                          </InstructionText>
+                        )}
+
+                        <SectionTitle>피드백 방식</SectionTitle>
+                        <OptionGroup>
+                          <OptionButton
+                            selected={selectedType === "text"}
+                            onClick={() => setSelectedType("text")}
+                          >
+                            텍스트
+                          </OptionButton>
+                          <OptionButton
+                            selected={selectedType === "image"}
+                            onClick={() => setSelectedType("image")}
+                          >
+                            이미지
+                          </OptionButton>
+                        </OptionGroup>
+
+                        {selectedType === "text" && (
+                          <TextArea
+                            placeholder="피드백을 입력하세요..."
+                            value={text}
+                            onChange={(e) => setText(e.target.value)}
+                          />
+                        )}
+
+                        {selectedType === "image" && (
+                          <>
+                            <FileInput
+                              ref={fileInputRef}
+                              type="file"
+                              accept="image/*"
+                              onChange={handleFileSelect}
+                            />
+                            {!imageFile ? (
+                              <FileUploadButton onClick={handleFileUploadClick}>
+                                이미지 선택
+                              </FileUploadButton>
+                            ) : (
+                              <ImagePreview>
+                                <PreviewImage
+                                  src={imagePreviewUrl || ""}
+                                  alt="Preview"
+                                />
+                                <RemoveImageButton onClick={handleRemoveImage}>
+                                  제거
+                                </RemoveImageButton>
+                              </ImagePreview>
+                            )}
+                          </>
+                        )}
+
+                        <FormButtonGroup>
+                          <FormButton
+                            variant="cancel"
+                            onClick={handleCancelAdd}
+                          >
+                            취소
+                          </FormButton>
+                          <FormButton
+                            variant="submit"
+                            onClick={handleSubmitFeedback}
+                            disabled={!canSubmit}
+                          >
+                            저장
+                          </FormButton>
+                        </FormButtonGroup>
+                      </>
+                    )}
                   </AddFeedbackForm>
                 )}
 
@@ -941,7 +1141,15 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
             </TwoColumnLayout>
           ) : (
             <>
-              <AddFeedbackButton onClick={() => setIsAddingFeedback(true)}>
+              <AddFeedbackButton
+                onClick={handleStartAddingFeedback}
+                disabled={hasFullFeedback}
+                title={
+                  hasFullFeedback
+                    ? "전체 이미지 피드백이 하나 있습니다. 삭제 후 추가할 수 있습니다."
+                    : undefined
+                }
+              >
                 + 피드백 추가하기
               </AddFeedbackButton>
               {currentFeedbackList.length === 0 && !isAddingFeedback && (

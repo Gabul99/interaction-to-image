@@ -14,6 +14,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import styled from "styled-components";
 import { useImageStore } from "../stores/imageStore";
+import { USE_MOCK_MODE } from "../config/api";
 import { connectImageStream } from "../api/websocket";
 import PromptNode from "./PromptNode";
 import ImageNode from "./ImageNode";
@@ -116,11 +117,39 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     currentGraphSession,
     selectedNodeId,
     selectNode,
-    getCurrentCompositionBboxes,
     updateNodePosition,
   } = useImageStore();
   const [branchingModalVisible, setBranchingModalVisible] = useState(false);
   const [branchingNodeId, setBranchingNodeId] = useState<string | null>(null);
+
+  // 현재 선택된 노드의 composition 데이터 가져오기
+  const compositionData = useMemo(() => {
+    if (!branchingNodeId || !currentGraphSession) {
+      console.log(
+        "[GraphCanvas] Composition 데이터: 없음 (branchingNodeId 또는 currentGraphSession 없음)"
+      );
+      return null;
+    }
+
+    // 루트 노드(prompt 노드)에서 composition 데이터 찾기
+    const rootNode = currentGraphSession.nodes.find((n) => n.type === "prompt");
+    const compositionData = rootNode?.data?.compositionData || null;
+
+    console.log("[GraphCanvas] Composition 데이터 저장 위치:", {
+      branchingNodeId,
+      rootNodeId: rootNode?.id,
+      rootNodeType: rootNode?.type,
+      hasCompositionData: !!compositionData,
+      compositionData: compositionData
+        ? {
+            bboxesCount: compositionData.bboxes?.length || 0,
+            bboxes: compositionData.bboxes,
+          }
+        : null,
+    });
+
+    return compositionData;
+  }, [branchingNodeId, currentGraphSession]);
 
   // React-flow의 nodes와 edges를 store의 데이터와 동기화
   const nodes: Node[] = useMemo(() => {
@@ -309,39 +338,39 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
       if (!currentGraphSession) return;
 
+      // Mock 모드 체크
+      if (USE_MOCK_MODE) {
+        console.log("[GraphCanvas] Mock 모드: 브랜치 시뮬레이션 시작");
+        const { simulateBranchImageStream } = useImageStore.getState();
+        simulateBranchImageStream(currentGraphSession.id, branchId);
+        return;
+      }
+
       // 백엔드에서 websocketUrl을 받은 경우 실제 WebSocket 연결
       if (websocketUrl) {
         const { addImageNodeToBranch } = useImageStore.getState();
-        
-        const ws = connectImageStream(
+
+        connectImageStream(
           currentGraphSession.id,
           websocketUrl,
           (imageStep) => {
             // 브랜치의 이미지 스텝 수신
-            console.log("[GraphCanvas] 브랜치 이미지 스텝 수신:", imageStep.step);
-            
+            console.log(
+              "[GraphCanvas] 브랜치 이미지 스텝 수신:",
+              imageStep.step
+            );
+
             // 브랜치에 이미지 노드 추가
-            const branch = currentGraphSession.branches.find(b => b.id === branchId);
+            const branch = currentGraphSession.branches.find(
+              (b) => b.id === branchId
+            );
             if (branch) {
-              const branchNodes = currentGraphSession.nodes.filter(n => branch.nodes.includes(n.id));
-              const lastNode = branchNodes[branchNodes.length - 1];
-              const parentNodeId = lastNode ? lastNode.id : branch.sourceNodeId;
-              
-              const siblings = branchNodes.filter(n => 
-                currentGraphSession.edges.find(e => e.target === n.id)?.source === parentNodeId
-              );
-              const xOffset = siblings.length * 220;
-              const position = {
-                x: lastNode ? lastNode.position.x + xOffset : 0,
-                y: lastNode ? lastNode.position.y + 280 : 0
-              };
-              
+              // position은 addImageNodeToBranch에서 자동 계산되므로 전달하지 않음
               addImageNodeToBranch(
                 currentGraphSession.id,
                 branchId,
                 imageStep.url,
-                imageStep.step || 0,
-                position
+                imageStep.step || 0
               );
             }
           },
@@ -379,8 +408,6 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     );
   }
 
-  const compositionBboxes = getCurrentCompositionBboxes() || [];
-
   return (
     <ReactFlowProvider>
       <div style={{ width: "100%", height: "100%" }} className={className}>
@@ -411,7 +438,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           setBranchingNodeId(null);
         }}
         onBranchCreated={handleBranchCreated}
-        compositionBboxes={compositionBboxes}
+        compositionData={compositionData}
       />
     </ReactFlowProvider>
   );

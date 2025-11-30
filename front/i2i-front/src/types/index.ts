@@ -1,15 +1,23 @@
-export type ToolMode = "point" | "bbox" | "none";
+export type ToolMode = "select" | "bbox" | "sketch" | "eraser" | "point" | "none";
 
 export interface InteractionData {
-  type: "point" | "bbox";
+  type: "point" | "bbox" | "sketch";
   x: number;
   y: number;
   width?: number;
   height?: number;
+  sketchData?: SketchLayer[]; // 스케치 데이터
+}
+
+// 스케치 레이어 데이터 구조
+export interface SketchLayer {
+  objectId: string;
+  color: string;
+  paths: Array<{ x: number; y: number }[]>; // 각 경로는 점들의 배열
 }
 
 // 피드백 관련 타입
-export type FeedbackArea = "full" | "point" | "bbox";
+export type FeedbackArea = "full" | "point" | "bbox" | "sketch";
 export type FeedbackType = "text" | "image";
 
 export interface FeedbackData {
@@ -66,6 +74,11 @@ export interface GraphNode {
     imageUrl?: string;
     step?: number;
     sessionId?: string;
+    // Composition 데이터 (루트 노드에만 저장)
+    compositionData?: {
+      bboxes: BoundingBox[];
+      sketchLayers: SketchLayer[];
+    };
   };
   position: { x: number; y: number };
 }

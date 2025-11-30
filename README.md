@@ -54,6 +54,36 @@ npm install
 npm run dev
 ```
 
+## Mock 모드 (더미 시뮬레이터)
+
+서버를 돌릴 수 없는 상황에서 테스트하기 위해 Mock 모드를 사용할 수 있습니다.
+
+### Mock 모드 활성화 방법
+
+**방법 1: 환경 변수 사용 (권장)**
+
+```bash
+# .env 파일 생성 또는 수정
+VITE_USE_MOCK_MODE=true
+
+# 개발 서버 실행
+npm run dev
+```
+
+**방법 2: 코드에서 직접 수정**
+`front/i2i-front/src/config/api.ts` 파일을 열고:
+
+```typescript
+export const USE_MOCK_MODE = true; // false를 true로 변경
+```
+
+### Mock 모드 동작
+
+- Mock 모드가 활성화되면 실제 서버 연결 없이 더미 데이터로 시뮬레이션합니다
+- 이미지 생성, 브랜치 생성 등이 모두 시뮬레이션으로 동작합니다
+- 실제 서버 코드는 그대로 유지되며, Mock 모드일 때만 시뮬레이션이 실행됩니다
+- Mock 모드를 비활성화하면 다시 실제 서버 연결을 시도합니다
+
 ## 프로젝트 구조
 
 ```
