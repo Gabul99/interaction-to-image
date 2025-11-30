@@ -20,6 +20,7 @@ import PromptNode from "./PromptNode";
 import ImageNode from "./ImageNode";
 import BranchingModal from "./BranchingModal";
 import FeedbackEdge from "./FeedbackEdge";
+import { stepOnce } from "../lib/api";
 
 const nodeTypes: NodeTypes = {
   prompt: PromptNode,
@@ -121,6 +122,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   } = useImageStore();
   const [branchingModalVisible, setBranchingModalVisible] = useState(false);
   const [branchingNodeId, setBranchingNodeId] = useState<string | null>(null);
+  const [isStepping, setIsStepping] = useState(false);
 
   // 현재 선택된 노드의 composition 데이터 가져오기
   const compositionData = useMemo(() => {
@@ -411,6 +413,110 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   return (
     <ReactFlowProvider>
       <div style={{ width: "100%", height: "100%" }} className={className}>
+        {/* Next Step button centered over canvas */}
+        <div
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            transform: "translate(-50%, -50%)",
+            zIndex: 1200,
+          }}
+        >
+          <button
+            onClick={async () => {
+              try {
+                if (!currentGraphSession) return;
+                const { backendSessionId, backendActiveBranchId, addImageNode, addImageNodeToBranch, currentGraphSession: gs } =
+                  useImageStore.getState();
+                const sessionId = backendSessionId || currentGraphSession.id;
+                // Determine target branch from selected node's backendBranchId; default to backendActiveBranchId or B0
+                let targetBranchId = backendActiveBranchId || "B0";
+                let parentNodeId: string | null = null;
+                if (selectedNodeId && gs) {
+                  // First, try to get backendBranchId from the selected node's data
+                  const selectedNode = gs.nodes.find((n) => n.id === selectedNodeId);
+                  if (selectedNode?.data?.backendBranchId) {
+                    targetBranchId = selectedNode.data.backendBranchId as string;
+                  } else {
+                    // Fallback to edge data
+                    const incoming = gs.edges.filter((e) => e.target === selectedNodeId);
+                    const incomingBranch = incoming.find((e) => e.type === "branch");
+                    if (incomingBranch?.data?.branchId) {
+                      targetBranchId = incomingBranch.data.branchId as string;
+                    }
+                  }
+                }
+                console.log(`[GraphCanvas] Next Step: selectedNodeId=${selectedNodeId}, targetBranchId=${targetBranchId}`);
+                setIsStepping(true);
+                const resp = await stepOnce({
+                  session_id: sessionId,
+                  branch_id: targetBranchId,
+                });
+                if (resp.preview_png_base64) {
+                  // Add to main vs branch
+                  if (targetBranchId === "B0") {
+                    // compute horizontal placement based on last main node
+                    const promptNode = gs?.nodes.find((n) => n.type === "prompt");
+                    const mainImageNodes = (gs?.nodes || []).filter((n) => {
+                      if (n.type !== "image") return false;
+                      const inEdge = (gs?.edges || []).find((e) => e.target === n.id);
+                      // main branch nodes have no 'branch' incoming edge
+                      return !inEdge || inEdge.type !== "branch";
+                    });
+                    const lastMain = mainImageNodes
+                      .slice()
+                      .sort(
+                        (a, b) => (a.data?.step || 0) - (b.data?.step || 0)
+                      )
+                      .pop();
+                    const horizontalSpacing = 400;
+                    const pos =
+                      lastMain && lastMain.id !== parentNodeId
+                        ? {
+                            x: lastMain.position.x + horizontalSpacing,
+                            y: lastMain.position.y,
+                          }
+                        : promptNode
+                        ? {
+                            x: promptNode.position.x + horizontalSpacing,
+                            y: promptNode.position.y,
+                          }
+                        : { x: 0, y: 0 };
+                    parentNodeId = lastMain?.id || promptNode?.id || null;
+                    addImageNode(
+                      sessionId,
+                      parentNodeId,
+                      resp.preview_png_base64,
+                      resp.i,
+                      pos
+                    );
+                  } else {
+                    addImageNodeToBranch(sessionId, targetBranchId, resp.preview_png_base64, resp.i);
+                  }
+                }
+              } catch (e) {
+                console.error("[GraphCanvas] Next Step failed:", e);
+              } finally {
+                setIsStepping(false);
+              }
+            }}
+            disabled={!currentGraphSession || isStepping}
+            style={{
+              padding: "10px 16px",
+              borderRadius: 8,
+              border: "none",
+              fontWeight: 700,
+              cursor: "pointer",
+              background: "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
+              color: "#fff",
+              opacity: !currentGraphSession || isStepping ? 0.6 : 1,
+            }}
+            title="진행 중인 브랜치에서 다음 스텝을 수행합니다"
+          >
+            Next Step
+          </button>
+        </div>
         <ReactFlow
           nodes={reactFlowNodes}
           edges={reactFlowEdges}

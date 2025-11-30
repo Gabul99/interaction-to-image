@@ -8,7 +8,7 @@ import {
   type BoundingBox,
 } from "../types";
 import { useImageStore } from "../stores/imageStore";
-import { createBranch as createBranchAPI } from "../api/branch";
+import { forkAtStep, applyGuidance } from "../lib/api";
 import ImageViewer from "./ImageViewer";
 import UnifiedCanvas from "./UnifiedCanvas";
 import FloatingToolbox from "./FloatingToolbox";
@@ -689,24 +689,105 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   };
 
   const handleCreateBranch = async () => {
-    if (!nodeId || !currentGraphSession || currentFeedbackList.length === 0) {
-      return;
-    }
-
+    // Requirement change: 실제 새로운 브랜치를 생성하고, 선택 노드 위에 병렬 노드를 표시
+    if (!nodeId || !currentGraphSession) return;
     try {
-      // 백엔드 API 호출
-      const { branchId, websocketUrl } = await createBranchAPI(
-        currentGraphSession.id,
-        nodeId,
-        currentFeedbackList
-      );
+      const store = useImageStore.getState();
+      const sessionId = store.backendSessionId || currentGraphSession.id;
+      
+      // Resolve step index and backend branch ID from selected node
+      const selectedNode = currentGraphSession.nodes.find((n) => n.id === nodeId);
+      const stepIdx = selectedNode?.data?.step || 0;
+      
+      // Get backend branch ID from node data (set when node was created)
+      // Priority: 1. Node's backendBranchId, 2. Edge data, 3. Active branch, 4. Default "B0"
+      let incomingBranchId: string;
+      if (selectedNode?.data?.backendBranchId) {
+        incomingBranchId = selectedNode.data.backendBranchId as string;
+      } else {
+        const incoming = currentGraphSession.edges.filter((e) => e.target === nodeId);
+        incomingBranchId =
+          (incoming.find((e) => e.type === "branch")?.data?.branchId as string | undefined) ||
+          (store.backendActiveBranchId || "B0");
+      }
+      
+      console.log(`[BranchingModal] Creating branch from node ${nodeId}, backend branch ${incomingBranchId}, step ${stepIdx}`);
+      
+      // Call backend to fork at this step
+      const resp = await forkAtStep({
+        session_id: sessionId,
+        branch_id: incomingBranchId,
+        step_index: stepIdx,
+      });
+      const newBranchId = resp.new_branch_id || resp.active_branch_id;
 
+      // Apply guidance from currentFeedbackList to the new branch
+      for (const feedback of currentFeedbackList) {
+        if (feedback.type === "text" && feedback.text) {
+          // Text guidance
+          const textRegion = feedback.bbox
+            ? {
+                x0: feedback.bbox.x,
+                y0: feedback.bbox.y,
+                x1: feedback.bbox.x + feedback.bbox.width,
+                y1: feedback.bbox.y + feedback.bbox.height,
+              }
+            : undefined;
+          await applyGuidance({
+            session_id: sessionId,
+            branch_id: newBranchId,
+            intervene_choice: "Text Guidance",
+            text_input: feedback.text,
+            text_scale: 2.0,
+            text_region: textRegion,
+          });
+        } else if (feedback.type === "image" && feedback.imageUrl) {
+          // Style guidance - need to convert imageUrl to File
+          // For now, if we have the original file stored, use it
+          // Otherwise, we need to fetch the image and create a File
+          const styleRegion = feedback.bbox
+            ? {
+                x0: feedback.bbox.x,
+                y0: feedback.bbox.y,
+                x1: feedback.bbox.x + feedback.bbox.width,
+                y1: feedback.bbox.y + feedback.bbox.height,
+              }
+            : undefined;
+          
+          // Try to fetch the image and create a File object
+          try {
+            const response = await fetch(feedback.imageUrl);
+            const blob = await response.blob();
+            const file = new File([blob], "style_reference.png", { type: blob.type });
+            await applyGuidance({
+              session_id: sessionId,
+              branch_id: newBranchId,
+              intervene_choice: "Style Guidance",
+              style_scale: 5.0,
+              style_region: styleRegion,
+              style_file: file,
+            });
+          } catch (imgError) {
+            console.error("[BranchingModal] Failed to apply style guidance:", imgError);
+          }
+        }
+      }
+
+      // Register new branch in graph
+      useImageStore.getState().createBranchInGraph(sessionId, newBranchId, nodeId);
+      // Create parallel node above: duplicate selected image
+      const imageUrl = selectedNode?.data?.imageUrl || "";
+      // Position slightly above the selected node
+      const position = selectedNode
+        ? { x: selectedNode.position.x, y: selectedNode.position.y - 220 }
+        : { x: 0, y: 0 };
+      useImageStore
+        .getState()
+        .addImageNodeToBranch(sessionId, newBranchId, imageUrl, stepIdx, position);
+      // Set backend active branch to the new one
+      useImageStore.getState().setBackendSessionMeta(sessionId, newBranchId);
       clearCurrentFeedbackList();
       onClose();
-
-      if (onBranchCreated) {
-        onBranchCreated(branchId, websocketUrl);
-      }
     } catch (error) {
       console.error("[BranchingModal] 브랜치 생성 실패:", error);
       alert("브랜치 생성에 실패했습니다. 다시 시도해주세요.");

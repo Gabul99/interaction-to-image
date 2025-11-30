@@ -144,6 +144,12 @@ export interface ImageStreamState {
     interval?: number
   ) => void;
 
+  // Backend session meta (REST flow)
+  backendSessionId: string | null;
+  backendActiveBranchId: string | null;
+  setBackendSessionMeta: (sessionId: string, activeBranchId: string) => void;
+  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string) => void;
+
   // 그래프 세션 관련 액션
   createGraphSession: (
     prompt: string,
@@ -207,6 +213,30 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     bboxes: [],
     selectedObjectId: null,
     isConfigured: false,
+  },
+  backendSessionId: null,
+  backendActiveBranchId: null,
+  setBackendSessionMeta: (sessionId: string, activeBranchId: string) => {
+    set({ backendSessionId: sessionId, backendActiveBranchId: activeBranchId });
+  },
+  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string) => {
+    const state = get();
+    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) return;
+    const exists = state.currentGraphSession.branches.find((b) => b.id === branchId);
+    if (exists) return;
+    const newBranch: Branch = {
+      id: branchId,
+      sourceNodeId,
+      feedback: [],
+      nodes: [],
+    };
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        branches: [...state.currentGraphSession.branches, newBranch],
+      },
+      backendActiveBranchId: branchId,
+    });
   },
 
   // 이미지 생성 시작
@@ -1256,10 +1286,13 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return finalNodeId;
     }
 
+    // For main branch nodes, use "B0" as the backend branch ID
+    const backendBranchId = "B0";
+    
     const newNode: GraphNode = {
       id: finalNodeId,
       type: "image",
-      data: { imageUrl, step, sessionId },
+      data: { imageUrl, step, sessionId, backendBranchId },
       position,
     };
 
@@ -1390,12 +1423,12 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     console.log(
       `[ImageStore] 새 노드 생성: nodeId=${finalNodeId}, imageUrl 길이=${
         imageUrl ? imageUrl.length : 0
-      }, step=${step}`
+      }, step=${step}, branchId=${branchId}`
     );
     const newNode: GraphNode = {
       id: finalNodeId,
       type: "image",
-      data: { imageUrl, step, sessionId },
+      data: { imageUrl, step, sessionId, backendBranchId: branchId },
       position: finalPosition,
     };
 

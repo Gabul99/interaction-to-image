@@ -7,7 +7,8 @@ import ObjectChipList from "./ObjectChipList";
 import UnifiedCanvas from "./UnifiedCanvas";
 import FloatingToolbox from "./FloatingToolbox";
 import ImageViewer from "./ImageViewer";
-import { requestObjectList, startImageGeneration } from "../api/composition";
+import { requestObjectList } from "../api/composition";
+import { startSession, type LayoutItem } from "../lib/api";
 import { API_BASE_URL } from "../config/api";
 import { exportSketchToFile } from "../utils/sketchUtils";
 
@@ -411,25 +412,42 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
       console.log("[CompositionModal] API_BASE_URL:", API_BASE_URL);
       console.log("=".repeat(80));
 
-      // 백엔드 API 호출하여 세션 생성 및 WebSocket URL 받기
-      console.log("[CompositionModal] startImageGeneration 호출 시작...");
-      const result = await startImageGeneration(
-        currentPrompt,
-        compositionState.objects.length > 0
-          ? compositionState.objects
-          : undefined,
-        bboxes,
-        sketchImageFile || undefined
-      );
-      console.log("[CompositionModal] startImageGeneration 완료:", result);
+      // REST API: 세션 시작
+      const layoutItems: LayoutItem[] | undefined =
+        compositionMode === "bbox" && (bboxes?.length || 0) > 0
+          ? bboxes!.map((bb) => {
+              const obj = compositionState.objects.find(
+                (o) => o.id === bb.objectId
+              );
+              return {
+                phrase: obj?.label || "object",
+                x0: bb.x,
+                y0: bb.y,
+                x1: bb.x + bb.width,
+                y1: bb.y + bb.height,
+              };
+            })
+          : undefined;
 
-      const { sessionId, rootNodeId, websocketUrl } = result;
+      const startResp = await startSession({
+        prompt: currentPrompt,
+        steps: 50,
+        seed: 67,
+        model_version: "512",
+        gpu_id: 0,
+        guidance_scale: 4.5,
+        enable_layout:
+          compositionMode === "bbox" && (layoutItems?.length || 0) > 0,
+        layout_items: layoutItems,
+      });
 
-      // 그래프 세션 생성 (백엔드에서 받은 sessionId와 rootNodeId 사용)
+      const sessionId = startResp.session_id;
+      const activeBranchId = startResp.active_branch_id;
+
+      // 그래프 세션 생성 (루트 노드는 프롬프트)
       const graphSessionId = createGraphSession(
         currentPrompt,
         sessionId,
-        rootNodeId,
         compositionMode === "bbox" && compositionState.bboxes.length > 0
           ? compositionState.bboxes
           : undefined,
@@ -441,74 +459,10 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
       console.log("[CompositionModal] 그래프 세션 생성 완료:", {
         graphSessionId,
         sessionId,
-        rootNodeId,
       });
 
-      // Mock 모드 체크
-      if (USE_MOCK_MODE) {
-        console.log(
-          "[CompositionModal] Mock 모드: WebSocket 연결 없이 시뮬레이션 시작"
-        );
-        // imageStore의 startGenerationWithComposition을 사용 (websocketUrl은 빈 문자열)
-        const { startGenerationWithComposition } = useImageStore.getState();
-        startGenerationWithComposition(
-          currentPrompt,
-          sessionId,
-          "", // Mock 모드에서는 websocketUrl이 필요 없음
-          compositionMode === "bbox" && compositionState.bboxes.length > 0
-            ? compositionState.bboxes
-            : undefined,
-          compositionMode === "sketch" && sketchLayers.length > 0
-            ? sketchLayers
-            : undefined
-        );
-      } else {
-        // WebSocket 연결 (websocketUrl이 있으면 연결)
-        console.log("[CompositionModal] WebSocket URL 확인:", websocketUrl);
-        if (!websocketUrl) {
-          console.error("=".repeat(80));
-          console.error("[CompositionModal] WebSocket URL이 없습니다!");
-          console.error(
-            "[CompositionModal] 백엔드 응답에서 websocketUrl을 받지 못했습니다."
-          );
-          console.error(
-            "[CompositionModal] 백엔드 서버가 실행 중인지 확인하세요."
-          );
-          console.error(
-            "[CompositionModal] SSH 터널링이 설정되어 있는지 확인하세요."
-          );
-          console.error(
-            "[CompositionModal] 또는 Mock 모드를 활성화하세요 (VITE_USE_MOCK_MODE=true)"
-          );
-          console.error("=".repeat(80));
-          throw new Error(
-            "WebSocket URL이 없습니다. 백엔드 서버를 확인하거나 Mock 모드를 활성화하세요."
-          );
-        }
-
-        console.log("[CompositionModal] WebSocket 연결 시작");
-        // imageStore의 startGenerationWithComposition을 사용하여 WebSocket 연결
-        // 이 함수는 ImageSession과 GraphSession 모두에 데이터를 추가합니다
-        const { startGenerationWithComposition } = useImageStore.getState();
-        startGenerationWithComposition(
-          currentPrompt,
-          sessionId,
-          websocketUrl,
-          compositionMode === "bbox" && compositionState.bboxes.length > 0
-            ? compositionState.bboxes
-            : undefined,
-          compositionMode === "sketch" && sketchLayers.length > 0
-            ? sketchLayers
-            : undefined
-        );
-      }
-
-      console.log("[CompositionModal] 세션 생성 완료:", {
-        sessionId,
-        rootNodeId,
-        websocketUrl,
-        graphSessionId,
-      });
+      // 자동 진행은 하지 않고 Next Step 버튼으로 사용자 승인 시 진행
+      useImageStore.getState().setBackendSessionMeta(sessionId, activeBranchId);
       console.log("[CompositionModal] 그래프 세션 생성:", graphSessionId);
 
       if (onComplete) {
