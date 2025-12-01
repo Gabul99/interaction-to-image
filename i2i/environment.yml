@@ -55,7 +55,7 @@ dependencies:
     - cycler==0.12.1
     - datasets==4.0.0
     - decord==0.6.0
-    - diffusers==0.30.0.dev0
+    - diffusers==0.30.0
     - dill==0.3.8
     - distlib==0.4.0
     - distro==1.9.0
@@ -66,7 +66,6 @@ dependencies:
     - fastapi==0.115.14
     - ffmpy==0.6.0
     - filelock==3.18.0
-    - flash-attn==2.8.0.post2
     - flatbuffers==25.9.23
     - fonttools==4.58.5
     - frozenlist==1.8.0
@@ -185,10 +184,10 @@ dependencies:
     - timm==1.0.22
     - tokenizers==0.22.1
     - tomlkit==0.13.3
-    - torch==2.8.0+cu128
-    - torchaudio==2.8.0+cu128
+    - torch==2.8.0
+    - torchaudio==2.8.0
     - torchmetrics==1.8.2
-    - torchvision==0.23.0+cu128
+    - torchvision==0.23.0
     - tqdm==4.67.1
     - transformers==4.57.1
     - triton==3.4.0
@@ -208,4 +207,5 @@ dependencies:
     - yapf==0.43.0
     - yarl==1.22.0
     - zipp==3.23.0
+    - flash-attn==2.8.0.post2
 prefix: /home/jaesang/.conda/envs/bagel
