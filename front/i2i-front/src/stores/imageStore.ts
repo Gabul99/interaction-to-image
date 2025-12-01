@@ -202,6 +202,9 @@ export interface ImageStreamState {
   ) => void;
   // 현재 노드에서 루트까지 역방향으로 올라가며 브랜치 피드백 수집
   getBranchFeedbacksForNode: (nodeId: string) => FeedbackRecord[];
+  
+  // Remove a node and all its descendants (for backtracking)
+  removeNodeAndDescendants: (sessionId: string, nodeId: string) => void;
 }
 
 export const useImageStore = create<ImageStreamState>((set, get) => ({
@@ -1850,5 +1853,63 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
 
     // 시간순으로 정렬 (오래된 것부터)
     return allFeedbacks.sort((a, b) => a.timestamp - b.timestamp);
+  },
+
+  // Remove a node and all its descendants (for backtracking)
+  removeNodeAndDescendants: (sessionId: string, nodeId: string) => {
+    const state = get();
+    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) {
+      console.warn("[ImageStore] Cannot remove node: session not found");
+      return;
+    }
+
+    const { nodes, edges, branches } = state.currentGraphSession;
+    
+    // Find all descendant nodes using BFS
+    const nodesToRemove = new Set<string>();
+    const queue = [nodeId];
+    
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      nodesToRemove.add(currentId);
+      
+      // Find all children (nodes that have edges from currentId)
+      for (const edge of edges) {
+        if (edge.source === currentId && !nodesToRemove.has(edge.target)) {
+          queue.push(edge.target);
+        }
+      }
+    }
+    
+    console.log(`[ImageStore] Removing nodes: ${Array.from(nodesToRemove).join(", ")}`);
+    
+    // Filter out removed nodes and edges
+    const newNodes = nodes.filter((n) => !nodesToRemove.has(n.id));
+    const newEdges = edges.filter(
+      (e) => !nodesToRemove.has(e.source) && !nodesToRemove.has(e.target)
+    );
+    
+    // Update branches to remove references to deleted nodes
+    const newBranches = branches.map((branch) => ({
+      ...branch,
+      nodes: branch.nodes.filter((nid) => !nodesToRemove.has(nid)),
+    }));
+    
+    // Clear selection if the selected node was removed
+    const newSelectedNodeId = nodesToRemove.has(state.selectedNodeId || "")
+      ? null
+      : state.selectedNodeId;
+    
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        nodes: newNodes,
+        edges: newEdges,
+        branches: newBranches,
+      },
+      selectedNodeId: newSelectedNodeId,
+    });
+    
+    console.log(`[ImageStore] Removed ${nodesToRemove.size} nodes, ${nodes.length - newNodes.length} remaining`);
   },
 }));

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState, useRef } from "react";
+import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
 import ReactFlow, {
   type Node,
   type Edge,
@@ -20,7 +20,7 @@ import PromptNode from "./PromptNode";
 import ImageNode from "./ImageNode";
 import BranchingModal from "./BranchingModal";
 import FeedbackEdge from "./FeedbackEdge";
-import { stepOnce, mergeBranches } from "../lib/api";
+import { stepOnce, mergeBranches, backtrackTo } from "../lib/api";
 
 const nodeTypes: NodeTypes = {
   prompt: PromptNode,
@@ -311,6 +311,9 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   
   // Store original positions for snap-back
   const originalPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  
+  // Backtracking state
+  const [isBacktracking, setIsBacktracking] = useState(false);
 
   // 현재 선택된 노드의 composition 데이터 가져오기
   const compositionData = useMemo(() => {
@@ -558,6 +561,27 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     
     return rightmostNode?.id || null;
   }, [selectedNodeId, currentGraphSession, selectedBranchNodeIds, getNodeBranchId]);
+
+  // Check if the selected branch is completed (reached num_steps)
+  // This is determined by checking if the rightmost node's step equals num_steps
+  const isBranchCompleted = useMemo(() => {
+    if (!selectedNodeId || !currentGraphSession || !rightmostBranchNodeId) return false;
+    
+    const rightmostNode = currentGraphSession.nodes.find((n) => n.id === rightmostBranchNodeId);
+    if (!rightmostNode || rightmostNode.type !== "image") return false;
+    
+    const step = rightmostNode.data?.step;
+    // We consider the branch completed if the step is at or beyond num_steps
+    // Note: num_steps is typically 50, and steps are 0-indexed, so step 50 means done
+    // We'll check if step >= 49 (assuming 50 total steps, 0-49)
+    // But since we don't have num_steps in frontend, we check if status was "done"
+    // For now, we'll assume a branch is complete if step >= 49 (for 50 steps)
+    // This should be improved by tracking completion status from backend
+    if (step !== undefined && step >= 49) {
+      return true;
+    }
+    return false;
+  }, [selectedNodeId, currentGraphSession, rightmostBranchNodeId]);
 
   // Calculate grid position for a node based on step and branch
   const calculateGridPosition = useCallback((step: number, branchIndex: number) => {
@@ -1191,6 +1215,72 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     console.log("[GraphCanvas] Pause requested");
   }, []);
 
+  // Handle backtracking - remove selected node and all descendants
+  const handleBacktrack = useCallback(async () => {
+    if (!currentGraphSession || !selectedNodeId) return;
+    if (isBacktracking || isStepping || isRunningToEnd) return;
+    
+    // Find the selected node
+    const selectedNode = currentGraphSession.nodes.find((n) => n.id === selectedNodeId);
+    if (!selectedNode || selectedNode.type !== "image") {
+      console.log("[GraphCanvas] Cannot backtrack: selected node is not an image node");
+      return;
+    }
+    
+    const step = selectedNode.data?.step;
+    if (step === undefined || step === 0) {
+      console.log("[GraphCanvas] Cannot backtrack: already at step 0 or no step info");
+      return;
+    }
+    
+    const { backendSessionId, removeNodeAndDescendants } = useImageStore.getState();
+    const sessionId = backendSessionId || currentGraphSession.id;
+    const targetBranchId = getTargetBranchFromSelectedNode();
+    
+    console.log(`[GraphCanvas] Backtracking: node=${selectedNodeId}, step=${step}, branch=${targetBranchId}`);
+    setIsBacktracking(true);
+    
+    try {
+      // Call backend to backtrack
+      const result = await backtrackTo({
+        session_id: sessionId,
+        branch_id: targetBranchId,
+        step_index: step - 1, // Go back one step before the selected node
+      });
+      
+      console.log("[GraphCanvas] Backtrack result:", result);
+      
+      // Remove the node and its descendants from the frontend
+      removeNodeAndDescendants(currentGraphSession.id, selectedNodeId);
+      
+      console.log("[GraphCanvas] Backtrack completed");
+    } catch (error) {
+      console.error("[GraphCanvas] Backtrack failed:", error);
+    } finally {
+      setIsBacktracking(false);
+    }
+  }, [currentGraphSession, selectedNodeId, isBacktracking, isStepping, isRunningToEnd, getTargetBranchFromSelectedNode]);
+
+  // Keyboard event handler for backspace
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // Check if backspace is pressed and we have a selected node
+      if (event.key === "Backspace" && selectedNodeId && currentGraphSession) {
+        // Don't trigger if user is typing in an input
+        const target = event.target as HTMLElement;
+        if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
+          return;
+        }
+        
+        event.preventDefault();
+        handleBacktrack();
+      }
+    };
+    
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedNodeId, currentGraphSession, handleBacktrack]);
+
   // Early return for empty state - MUST be after all hooks
   if (!currentGraphSession) {
     return (
@@ -1252,43 +1342,55 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           {/* Next Step Button */}
           <button
             onClick={handleNextStep}
-            disabled={!currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd}
+            disabled={!currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted}
             style={{
               padding: "10px 16px",
               borderRadius: 8,
               border: "none",
               fontWeight: 700,
-              cursor: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd ? "not-allowed" : "pointer",
-              background: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd
+              cursor: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted ? "not-allowed" : "pointer",
+              background: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted
                 ? "linear-gradient(135deg, #4b5563 0%, #6b7280 100%)"
                 : "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
               color: "#fff",
-              opacity: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd ? 0.6 : 1,
+              opacity: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted ? 0.6 : 1,
             }}
-            title={!selectedNodeId ? "노드를 선택하세요" : "선택된 브랜치에서 다음 스텝을 수행합니다"}
+            title={
+              !selectedNodeId 
+                ? "노드를 선택하세요" 
+                : isBranchCompleted 
+                ? "이 브랜치는 완료되었습니다" 
+                : "선택된 브랜치에서 다음 스텝을 수행합니다"
+            }
           >
-            {isStepping ? "Processing..." : !selectedNodeId ? "Select a node" : "Next Step"}
+            {isStepping ? "Processing..." : !selectedNodeId ? "Select a node" : isBranchCompleted ? "Completed ✓" : "Next Step"}
           </button>
           
           {/* Run to End Button */}
           <button
             onClick={handleRunToEnd}
-            disabled={!currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd}
+            disabled={!currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted}
             style={{
               padding: "10px 16px",
               borderRadius: 8,
               border: "none",
               fontWeight: 700,
-              cursor: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd ? "not-allowed" : "pointer",
-              background: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd
+              cursor: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted ? "not-allowed" : "pointer",
+              background: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted
                 ? "linear-gradient(135deg, #4b5563 0%, #6b7280 100%)"
                 : "linear-gradient(135deg, #10b981 0%, #059669 100%)",
               color: "#fff",
-              opacity: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd ? 0.6 : 1,
+              opacity: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted ? 0.6 : 1,
             }}
-            title={!selectedNodeId ? "노드를 선택하세요" : "선택된 브랜치를 끝까지 자동으로 진행합니다"}
+            title={
+              !selectedNodeId 
+                ? "노드를 선택하세요" 
+                : isBranchCompleted 
+                ? "이 브랜치는 완료되었습니다" 
+                : "선택된 브랜치를 끝까지 자동으로 진행합니다"
+            }
           >
-            {isRunningToEnd ? "Running..." : "Run to End"}
+            {isRunningToEnd ? "Running..." : isBranchCompleted ? "Completed ✓" : "Run to End"}
           </button>
 
           {/* Pause Button - only visible when running */}
