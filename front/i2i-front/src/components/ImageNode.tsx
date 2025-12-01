@@ -1,11 +1,13 @@
 import React from "react";
-import { createPortal } from "react-dom";
 import { Handle, Position } from "reactflow";
 import styled from "styled-components";
 
-// Outer wrapper - simplified without padding for branching button
+// Outer wrapper - includes hover area for branching button
 const NodeWrapper = styled.div`
   position: relative;
+  /* Extend hover area above the node for the branching button */
+  padding-top: 40px;
+  margin-top: -40px;
   
   /* Remove ReactFlow's default selection highlight from wrapper */
   /* ReactFlow applies .react-flow__node.selected class, so we override it */
@@ -13,6 +15,12 @@ const NodeWrapper = styled.div`
     outline: none !important;
     box-shadow: none !important;
     border: none !important;
+  }
+  
+  /* Show branching button on hover */
+  &:hover .branching-button {
+    opacity: 1;
+    pointer-events: auto;
   }
 `;
 
@@ -86,11 +94,12 @@ const NodeLabel = styled.div`
   text-align: center;
 `;
 
-// Branching button positioned ABOVE the node container using Portal
-const BranchingButton = styled.button<{ $top: number; $left: number }>`
-  position: fixed;
-  top: ${props => props.$top}px;
-  left: ${props => props.$left}px;
+// Branching button positioned ABOVE the node container
+// Now positioned absolutely within the wrapper, not using Portal
+const BranchingButton = styled.button`
+  position: absolute;
+  top: 4px; /* Within the padding-top area */
+  left: 50%;
   transform: translateX(-50%);
   background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
   border: none;
@@ -100,11 +109,11 @@ const BranchingButton = styled.button<{ $top: number; $left: number }>`
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  opacity: 1;
-  pointer-events: auto;
+  opacity: 0;
+  pointer-events: none;
   transition: all 0.2s ease;
   box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
-  z-index: 1000;
+  z-index: 100;
   white-space: nowrap;
 
   &:hover {
@@ -205,8 +214,6 @@ interface ImageNodeProps {
 
 const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
   const [imageLoaded, setImageLoaded] = React.useState(false);
-  const [buttonPosition, setButtonPosition] = React.useState<{ top: number; left: number } | null>(null);
-  const nodeRef = React.useRef<HTMLDivElement>(null);
 
   const handleBranchClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -224,70 +231,19 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
     }
   }, [data?.imageUrl, id, data?.step]);
 
-  // Update button position when node position changes
-  React.useEffect(() => {
-    const updatePosition = () => {
-      if (nodeRef.current) {
-        const rect = nodeRef.current.getBoundingClientRect();
-        setButtonPosition({
-          top: rect.top - 36, // 36px above the node
-          left: rect.left + rect.width / 2, // Center of the node
-        });
-      }
-    };
-
-    updatePosition();
-    
-    // Update on scroll and resize
-    window.addEventListener('scroll', updatePosition, true);
-    window.addEventListener('resize', updatePosition);
-    
-    // Listen for ReactFlow viewport changes (zoom/pan)
-    const handleViewportChange = () => {
-      updatePosition();
-    };
-    window.addEventListener('reactflow-viewport-change', handleViewportChange);
-    
-    // Use MutationObserver to detect ReactFlow position changes
-    const observer = new MutationObserver(updatePosition);
-    if (nodeRef.current) {
-      observer.observe(nodeRef.current.parentElement || document.body, {
-        attributes: true,
-        attributeFilter: ['style', 'transform'],
-        subtree: true,
-      });
-    }
-
-    // Use requestAnimationFrame to continuously update position
-    // This ensures the button stays in sync even if other methods fail
-    let rafId: number;
-    const rafUpdate = () => {
-      if (selected) {
-        updatePosition();
-        rafId = requestAnimationFrame(rafUpdate);
-      }
-    };
-    if (selected) {
-      rafId = requestAnimationFrame(rafUpdate);
-    }
-
-    return () => {
-      window.removeEventListener('scroll', updatePosition, true);
-      window.removeEventListener('resize', updatePosition);
-      window.removeEventListener('reactflow-viewport-change', handleViewportChange);
-      observer.disconnect();
-      if (rafId) {
-        cancelAnimationFrame(rafId);
-      }
-    };
-  }, [selected, data?.step]); // Update when selection or step changes
-
   return (
-    <>
-      <NodeWrapper ref={nodeRef}>
-        <Handle type="target" position={Position.Left} style={{ background: "#6366f1", top: "50%" }} />
-        
-        <NodeContainer selected={selected || false} isMergeTarget={data?.isMergeTarget}>
+    <NodeWrapper>
+      {/* Branching button - positioned in the padding area above the node, shown on hover */}
+      <BranchingButton
+        className="branching-button"
+        onClick={handleBranchClick}
+      >
+        ✨ Branching
+      </BranchingButton>
+      
+      <Handle type="target" position={Position.Left} style={{ background: "#6366f1", top: "50%" }} />
+      
+      <NodeContainer selected={selected || false} isMergeTarget={data?.isMergeTarget}>
         <ImageWrapper>
           {/* Placeholder - 항상 표시 (이미지 로드 전까지) */}
           {!imageLoaded && (
@@ -330,22 +286,8 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
         )}
       </NodeContainer>
       
-        <Handle type="source" position={Position.Right} style={{ background: "#6366f1", top: "50%" }} />
-      </NodeWrapper>
-      
-      {/* Branching button - rendered via Portal outside the node wrapper, shown when node is selected */}
-      {buttonPosition && selected && createPortal(
-        <BranchingButton
-          className="branching-button visible"
-          onClick={handleBranchClick}
-          $top={buttonPosition.top}
-          $left={buttonPosition.left}
-        >
-          ✨ Branching
-        </BranchingButton>,
-        document.body
-      )}
-    </>
+      <Handle type="source" position={Position.Right} style={{ background: "#6366f1", top: "50%" }} />
+    </NodeWrapper>
   );
 };
 

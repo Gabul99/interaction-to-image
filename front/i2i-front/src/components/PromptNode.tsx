@@ -15,6 +15,11 @@ const NodeContainer = styled.div<{ selected: boolean }>`
       ? "0 8px 32px rgba(99, 102, 241, 0.4)"
       : "0 4px 16px rgba(0, 0, 0, 0.2)"};
   transition: all 0.2s ease;
+  cursor: grab;
+  
+  &:active {
+    cursor: grabbing;
+  }
 `;
 
 const PromptText = styled.div`

@@ -718,25 +718,40 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     setIsCreatingBranch(true);
     try {
       const store = useImageStore.getState();
-      const sessionId = store.backendSessionId || currentGraphSession.id;
       
       // Resolve step index and backend branch ID from selected node
       const selectedNode = currentGraphSession.nodes.find((n) => n.id === nodeId);
       const stepIdx = selectedNode?.data?.step || 0;
       
+      // Get the correct backend session ID for this node (may be from a parallel session)
+      // This is CRITICAL for parallel sessions - we must use the session ID that owns this node
+      const nodeSession = store.getBackendSessionForNode(nodeId);
+      const sessionId = nodeSession?.sessionId || store.backendSessionId || currentGraphSession.id;
+      
       // Get backend branch ID from node data (set when node was created)
-      // Priority: 1. Node's backendBranchId, 2. Edge data, 3. Active branch, 4. Default "B0"
+      // Priority: 1. Node's backendBranchId, 2. nodeSession.branchId, 3. Edge data, 4. Active branch, 5. Default "B0"
       let incomingBranchId: string;
       if (selectedNode?.data?.backendBranchId) {
         incomingBranchId = selectedNode.data.backendBranchId as string;
+      } else if (nodeSession?.branchId) {
+        incomingBranchId = nodeSession.branchId;
       } else {
         const incoming = currentGraphSession.edges.filter((e) => e.target === nodeId);
-        incomingBranchId =
-          (incoming.find((e) => e.type === "branch")?.data?.branchId as string | undefined) ||
-          (store.backendActiveBranchId || "B0");
-    }
+        // Extract backend branch ID from edge data (edge.data.branchId might be unique ID)
+        const edgeBranchId = incoming.find((e) => e.type === "branch")?.data?.backendBranchId ||
+                            incoming.find((e) => e.type === "branch")?.data?.branchId;
+        incomingBranchId = (edgeBranchId as string | undefined) || (store.backendActiveBranchId || "B0");
+        
+        // If it's a unique branch ID, extract the backend branch ID
+        if (incomingBranchId && incomingBranchId.startsWith("sess_")) {
+          const match = incomingBranchId.match(/^sess_[a-zA-Z0-9]+_(B\d+)$/);
+          if (match) {
+            incomingBranchId = match[1];
+          }
+        }
+      }
 
-      console.log(`[BranchingModal] Creating branch from node ${nodeId}, backend branch ${incomingBranchId}, step ${stepIdx}`);
+      console.log(`[BranchingModal] Creating branch from node ${nodeId}, backend session ${sessionId}, backend branch ${incomingBranchId}, step ${stepIdx}`);
       
       // Call backend to fork at this step
       const resp = await forkAtStep({
@@ -799,14 +814,24 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
       }
 
       // Register new branch in graph with feedback information
-      useImageStore.getState().createBranchInGraph(sessionId, newBranchId, nodeId, currentFeedbackList);
+      // createBranchInGraph now takes backendSessionId and returns the unique branch ID
+      const graphSessionId = currentGraphSession.id;
+      const uniqueBranchId = useImageStore.getState().createBranchInGraph(
+        graphSessionId, 
+        newBranchId, // backend branch ID (e.g., "B1")
+        nodeId, 
+        sessionId, // backend session ID
+        currentFeedbackList
+      );
+      
       // Create parallel node above: duplicate selected image
       const imageUrl = selectedNode?.data?.imageUrl || "";
       // Don't pass position - let addImageNodeToBranch calculate it using grid layout
       // This ensures the node is placed at the correct rowIndex (y coordinate)
+      // Use the unique branch ID for adding nodes
       useImageStore
         .getState()
-        .addImageNodeToBranch(sessionId, newBranchId, imageUrl, stepIdx, undefined);
+        .addImageNodeToBranch(graphSessionId, uniqueBranchId, imageUrl, stepIdx, undefined);
       // Set backend active branch to the new one
       useImageStore.getState().setBackendSessionMeta(sessionId, newBranchId);
       clearCurrentFeedbackList();

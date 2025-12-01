@@ -63,7 +63,7 @@ const PlaceholderNode: React.FC<PlaceholderNodeProps> = ({ data, selected, id })
       <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
       <NodeContainer selected={selected || false} onClick={handleClick}>
         <PlusIcon>+</PlusIcon>
-        <NodeLabel>New Node</NodeLabel>
+        <NodeLabel>New Prompt</NodeLabel>
       </NodeContainer>
       <Handle type="source" position={Position.Right} style={{ background: "#6366f1" }} />
     </>

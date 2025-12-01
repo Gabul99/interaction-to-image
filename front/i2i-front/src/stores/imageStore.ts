@@ -21,9 +21,44 @@ const GRID_START_X = 100;
 const GRID_START_Y = 50;
 
 /**
+ * Create a unique branch ID by combining backend session ID and backend branch ID.
+ * This ensures branch IDs are unique across parallel sessions.
+ * @param backendSessionId - Backend session ID
+ * @param backendBranchId - Backend branch ID (e.g., "B0", "B1")
+ * @returns Unique branch ID (e.g., "sess_abc123_B0")
+ */
+export const createUniqueBranchId = (
+  backendSessionId: string,
+  backendBranchId: string
+): string => {
+  // Use a short prefix of the session ID to keep IDs readable
+  const shortSessionId = backendSessionId.slice(0, 8);
+  return `sess_${shortSessionId}_${backendBranchId}`;
+};
+
+/**
+ * Extract the backend branch ID from a unique branch ID.
+ * @param uniqueBranchId - Unique branch ID (e.g., "sess_abc123_B0")
+ * @returns Backend branch ID (e.g., "B0") or the original ID if not in unique format
+ */
+export const extractBackendBranchId = (uniqueBranchId: string): string => {
+  const match = uniqueBranchId.match(/^sess_[a-zA-Z0-9]+_(B\d+)$/);
+  return match ? match[1] : uniqueBranchId;
+};
+
+/**
+ * Check if a branch ID is in the unique format (contains session prefix).
+ * @param branchId - Branch ID to check
+ * @returns True if the ID is in unique format
+ */
+export const isUniqueBranchId = (branchId: string): boolean => {
+  return branchId.startsWith("sess_");
+};
+
+/**
  * Calculate branch row index (main branch = 0, others = 1, 2, 3...)
  * Branches are sorted by their ID number (B1, B2, B3...) to ensure consistent ordering
- * @param branchId - Branch ID (e.g., "B0", "B1", "B2")
+ * @param branchId - Branch ID (can be unique or backend format)
  * @param branches - Array of all branches in the graph session
  * @returns Row index (0 for main branch, 1+ for others)
  */
@@ -31,22 +66,40 @@ export const getBranchRowIndex = (
   branchId: string,
   branches: Branch[]
 ): number => {
-  if (branchId === "B0") return 0;
+  // Extract backend branch ID if in unique format
+  const backendBranchId = extractBackendBranchId(branchId);
+  
+  // Check if this is a main branch (B0)
+  if (backendBranchId === "B0") {
+    // For parallel sessions, each session's B0 should be on a different row
+    // Find the branch and use its index among all main branches
+    const branch = branches.find((b) => b.id === branchId);
+    if (branch) {
+      const mainBranches = branches.filter((b) => extractBackendBranchId(b.id) === "B0");
+      const mainIndex = mainBranches.findIndex((b) => b.id === branchId);
+      return mainIndex >= 0 ? mainIndex : 0;
+    }
+    return 0;
+  }
 
-  // Extract branch number from ID (e.g., "B1" -> 1, "B2" -> 2)
+  // Extract branch number from backend ID (e.g., "B1" -> 1, "B2" -> 2)
   const getBranchNumber = (id: string): number => {
-    const match = id.match(/^B(\d+)$/);
+    const backendId = extractBackendBranchId(id);
+    const match = backendId.match(/^B(\d+)$/);
     return match ? parseInt(match[1], 10) : 0;
   };
 
+  // Count main branches (B0s) to offset non-main branches
+  const mainBranchCount = branches.filter((b) => extractBackendBranchId(b.id) === "B0").length;
+
   // Get all non-main branches and sort by their ID number
   const nonMainBranches = branches
-    .filter((b) => b.id !== "B0")
+    .filter((b) => extractBackendBranchId(b.id) !== "B0")
     .sort((a, b) => getBranchNumber(a.id) - getBranchNumber(b.id));
 
   // Find the index of the target branch in the sorted array
   const index = nonMainBranches.findIndex((b) => b.id === branchId);
-  return index >= 0 ? index + 1 : 1; // +1 because main branch is row 0
+  return index >= 0 ? mainBranchCount + index : mainBranchCount; // Offset by main branch count
 };
 
 export interface ImageStep {
@@ -183,10 +236,14 @@ export interface ImageStreamState {
   backendSessionId: string | null;
   backendActiveBranchId: string | null;
   setBackendSessionMeta: (sessionId: string, activeBranchId: string) => void;
-  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string, feedback?: FeedbackRecord[]) => void;
+  // Create a branch in the graph with unique ID
+  // backendBranchId: The branch ID from the backend (e.g., "B1")
+  // backendSessionId: The backend session ID this branch belongs to
+  createBranchInGraph: (graphSessionId: string, backendBranchId: string, sourceNodeId: string, backendSessionId: string, feedback?: FeedbackRecord[]) => string; // Returns the unique branch ID
   createMergedBranchWithNode: (
-    sessionId: string,
-    branchId: string,
+    graphSessionId: string,
+    backendBranchId: string, // Backend branch ID (e.g., "B3")
+    backendSessionId: string, // Backend session ID
     sourceNodeId1: string, // First source node (e.g., from branch 1)
     sourceNodeId2: string, // Second source node (e.g., from branch 2)
     imageUrl: string,
@@ -215,7 +272,8 @@ export interface ImageStreamState {
     imageUrl: string,
     step: number,
     position: { x: number; y: number },
-    nodeId?: string
+    nodeId?: string,
+    explicitBranchId?: string // Optional: explicit unique branch ID for non-main branches
   ) => string; // nodeId 반환
   addImageNodeToBranch: (
     sessionId: string,
@@ -267,6 +325,27 @@ export interface ImageStreamState {
   
   // Remove a node and all its descendants (for backtracking)
   removeNodeAndDescendants: (sessionId: string, nodeId: string) => void;
+  
+  // Parallel session support
+  // Map of prompt node ID -> backend session info
+  parallelSessions: Map<string, { backendSessionId: string; backendBranchId: string }>;
+  
+  // Add a new prompt node for parallel session
+  addPromptNodeToGraph: (
+    prompt: string,
+    backendSessionId: string,
+    backendBranchId: string,
+    bboxes?: BoundingBox[],
+    sketchLayers?: SketchLayer[],
+    position?: { x: number; y: number },
+    placeholderNodeId?: string // Optional: convert placeholder to prompt
+  ) => string | null; // Returns the new prompt node ID
+  
+  // Get backend session info for a node (traces back to its prompt node)
+  getBackendSessionForNode: (nodeId: string) => { sessionId: string; branchId: string } | null;
+  
+  // Register a parallel session for a prompt node
+  registerParallelSession: (promptNodeId: string, backendSessionId: string, backendBranchId: string) => void;
 }
 
 export const useImageStore = create<ImageStreamState>((set, get) => ({
@@ -290,13 +369,21 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   },
   backendSessionId: null,
   backendActiveBranchId: null,
+  
+  // Parallel sessions map: promptNodeId -> { backendSessionId, backendBranchId }
+  parallelSessions: new Map(),
+  
   setBackendSessionMeta: (sessionId: string, activeBranchId: string) => {
     set({ backendSessionId: sessionId, backendActiveBranchId: activeBranchId });
   },
-  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string, feedback?: FeedbackRecord[]) => {
+  createBranchInGraph: (graphSessionId: string, backendBranchId: string, sourceNodeId: string, backendSessionId: string, feedback?: FeedbackRecord[]): string => {
     const state = get();
-    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) return;
-    const exists = state.currentGraphSession.branches.find((b) => b.id === branchId);
+    if (!state.currentGraphSession || state.currentGraphSession.id !== graphSessionId) return "";
+    
+    // Create unique branch ID combining session and backend branch ID
+    const uniqueBranchId = createUniqueBranchId(backendSessionId, backendBranchId);
+    
+    const exists = state.currentGraphSession.branches.find((b) => b.id === uniqueBranchId);
     if (exists) {
       // Update existing branch with feedback if provided
       if (feedback && feedback.length > 0) {
@@ -304,22 +391,22 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
           currentGraphSession: {
             ...state.currentGraphSession,
             branches: state.currentGraphSession.branches.map((b) =>
-              b.id === branchId ? { ...b, feedback: [...(b.feedback || []), ...feedback] } : b
+              b.id === uniqueBranchId ? { ...b, feedback: [...(b.feedback || []), ...feedback] } : b
             ),
           },
         });
       }
-      return;
+      return uniqueBranchId;
     }
     
     // Debug: Log branch creation
-    const nonMainBranchesBefore = state.currentGraphSession.branches.filter((b) => b.id !== "B0");
-    console.log(`[ImageStore] Creating branch ${branchId}`);
+    console.log(`[ImageStore] Creating branch: unique=${uniqueBranchId}, backend=${backendBranchId}, session=${backendSessionId}`);
     console.log(`[ImageStore] Branches BEFORE:`, state.currentGraphSession.branches.map(b => b.id).join(", "));
-    console.log(`[ImageStore] Non-main branches BEFORE:`, nonMainBranchesBefore.map(b => b.id).join(", "));
     
     const newBranch: Branch = {
-      id: branchId,
+      id: uniqueBranchId,
+      backendBranchId,
+      backendSessionId,
       sourceNodeId,
       feedback: feedback || [],
       nodes: [],
@@ -329,21 +416,22 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         ...state.currentGraphSession,
         branches: [...state.currentGraphSession.branches, newBranch],
       },
-      backendActiveBranchId: branchId,
+      backendActiveBranchId: backendBranchId,
     });
     
     // Debug: Log after creation
     const updatedState = get();
-    const nonMainBranchesAfter = updatedState.currentGraphSession!.branches.filter((b) => b.id !== "B0");
     console.log(`[ImageStore] Branches AFTER:`, updatedState.currentGraphSession!.branches.map(b => b.id).join(", "));
-    console.log(`[ImageStore] Non-main branches AFTER:`, nonMainBranchesAfter.map(b => b.id).join(", "));
+    
+    return uniqueBranchId;
   },
 
   // Create a merged branch and its initial node atomically
   // Connects to both source nodes to visually show the merge
   createMergedBranchWithNode: (
-    sessionId: string,
-    branchId: string,
+    graphSessionId: string,
+    backendBranchId: string, // Backend branch ID (e.g., "B3")
+    backendSessionId: string, // Backend session ID
     sourceNodeId1: string, // First source node (e.g., from branch 1)
     sourceNodeId2: string, // Second source node (e.g., from branch 2)
     imageUrl: string,
@@ -352,15 +440,18 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     placeholderNodeId?: string // Optional: placeholder node ID to convert
   ): string => {
     const state = get();
-    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) {
+    if (!state.currentGraphSession || state.currentGraphSession.id !== graphSessionId) {
       console.warn("[ImageStore] Cannot create merged branch: session not found");
       return "";
     }
     
+    // Create unique branch ID
+    const uniqueBranchId = createUniqueBranchId(backendSessionId, backendBranchId);
+    
     // Check if branch already exists
-    const exists = state.currentGraphSession.branches.find((b) => b.id === branchId);
+    const exists = state.currentGraphSession.branches.find((b) => b.id === uniqueBranchId);
     if (exists) {
-      console.warn("[ImageStore] Branch already exists:", branchId);
+      console.warn("[ImageStore] Branch already exists:", uniqueBranchId);
       return "";
     }
 
@@ -378,12 +469,12 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         console.log(`[ImageStore] Converting placeholder node ${nodeId} to merge result node`);
       } else {
         // Placeholder node를 찾을 수 없으면 새로 생성
-        nodeId = `node_merged_${branchId}_${step}_${Date.now()}`;
+        nodeId = `node_merged_${uniqueBranchId}_${step}_${Date.now()}`;
         console.warn(`[ImageStore] Placeholder node ${placeholderNodeId} not found, creating new node`);
       }
     } else {
       // Generate node ID
-      nodeId = `node_merged_${branchId}_${step}_${Date.now()}`;
+      nodeId = `node_merged_${uniqueBranchId}_${step}_${Date.now()}`;
     }
     
     // Find PARENT nodes of the source nodes (previous step nodes)
@@ -399,9 +490,11 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     const parentNodeId1 = sourceEdge1 ? sourceEdge1.source : sourceNodeId1;
     const parentNodeId2 = sourceEdge2 ? sourceEdge2.source : sourceNodeId2;
     
-    // Create the new branch (use first parent as the primary sourceNodeId)
+    // Create the new branch with unique ID (use first parent as the primary sourceNodeId)
     const newBranch: Branch = {
-      id: branchId,
+      id: uniqueBranchId,
+      backendBranchId,
+      backendSessionId,
       sourceNodeId: parentNodeId1,
       feedback: [],
       nodes: [nodeId], // Include the new node
@@ -414,8 +507,10 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       data: { 
         imageUrl, 
         step, 
-        sessionId, 
-        backendBranchId: branchId,
+        sessionId: graphSessionId, 
+        backendBranchId, // Backend branch ID (e.g., "B3")
+        backendSessionId, // Backend session ID
+        uniqueBranchId, // Unique branch ID (e.g., "sess_abc123_B3")
         // Store merge info for potential UI display
         mergedFrom: [sourceNodeId1, sourceNodeId2],
       },
@@ -429,7 +524,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       source: parentNodeId1,
       target: nodeId,
       type: "branch",
-      data: { branchId, isMergeEdge: true },
+      data: { branchId: uniqueBranchId, backendBranchId, isMergeEdge: true },
     };
 
     // Only create second edge if parent nodes are different
@@ -441,12 +536,12 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         source: parentNodeId2,
         target: nodeId,
         type: "branch",
-        data: { branchId, isMergeEdge: true },
+        data: { branchId: uniqueBranchId, backendBranchId, isMergeEdge: true },
       };
       edges.push(edge2);
     }
 
-    console.log(`[ImageStore] Creating merged branch ${branchId} with node ${nodeId}`);
+    console.log(`[ImageStore] Creating merged branch: unique=${uniqueBranchId}, backend=${backendBranchId}, node=${nodeId}`);
     console.log(`[ImageStore] Merge edges: ${parentNodeId1} -> ${nodeId}, ${parentNodeId2} -> ${nodeId}`);
 
     // Update state atomically
@@ -464,10 +559,10 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         edges: [...state.currentGraphSession.edges, ...edges],
         branches: [...state.currentGraphSession.branches, newBranch],
       },
-      backendActiveBranchId: branchId,
+      backendActiveBranchId: backendBranchId, // Set backend active branch ID
     });
 
-    console.log(`[ImageStore] Merged branch created successfully: ${branchId}, node: ${nodeId}`);
+    console.log(`[ImageStore] Merged branch created successfully: unique=${uniqueBranchId}, backend=${backendBranchId}, node: ${nodeId}`);
     return nodeId;
   },
 
@@ -1462,6 +1557,9 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       }
     }
 
+    // Create unique branch ID for the main branch
+    const uniqueMainBranchId = createUniqueBranchId(sessionId, "B0");
+
     // 프롬프트 노드 생성 (루트 노드)
     // placeholder node가 있으면 그 위치에, 없으면 기본 위치에
     const promptNodeId = rootNodeId || `node_prompt_${Date.now()}`;
@@ -1470,6 +1568,10 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       type: "prompt",
       data: {
         prompt,
+        backendSessionId: sessionId, // Store the backend session ID
+        backendBranchId: "B0", // Backend branch ID
+        uniqueBranchId: uniqueMainBranchId, // Unique branch ID
+        rowIndex: 0, // First prompt node is at row 0
         // Composition 데이터를 루트 노드에 저장
         compositionData:
           (bboxes && bboxes.length > 0) ||
@@ -1483,9 +1585,11 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       position: placeholderPosition,
     };
 
-    // 메인 브랜치 생성
+    // 메인 브랜치 생성 with unique ID
     const mainBranch: Branch = {
-      id: `branch_main_${Date.now()}`,
+      id: uniqueMainBranchId,
+      backendBranchId: "B0",
+      backendSessionId: sessionId,
       sourceNodeId: promptNodeId,
       feedback: [],
       nodes: [],
@@ -1532,7 +1636,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     };
 
     set({ currentGraphSession: graphSession });
-    console.log("[ImageStore] 그래프 세션 생성:", sessionId);
+    console.log("[ImageStore] 그래프 세션 생성:", sessionId, "main branch:", uniqueMainBranchId);
 
     return sessionId;
   },
@@ -1577,7 +1681,8 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     imageUrl: string,
     step: number,
     position: { x: number; y: number },
-    nodeId?: string
+    nodeId?: string,
+    explicitBranchId?: string // Optional: explicit unique branch ID for non-main branches
   ): string => {
     const state = get();
     if (
@@ -1588,48 +1693,113 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return "";
     }
 
-    // 백엔드에서 보낸 nodeId를 사용하거나 새로 생성
-    // 백엔드에서 보낸 nodeId 형식: node_image_{session_id}_{step_idx}
-    const finalNodeId = nodeId || `node_image_${sessionId}_${step}`;
+    // FIRST: Get the backend branch ID and session ID from the parent node's session info
+    // This must be done BEFORE generating node ID to ensure uniqueness across parallel sessions
+    let backendBranchId = "B0";
+    let backendSessionId: string | undefined;
+    let uniqueBranchId: string | undefined;
+    
+    // If explicit branch ID is provided, use it (for non-main branches)
+    if (explicitBranchId) {
+      uniqueBranchId = explicitBranchId;
+      backendBranchId = extractBackendBranchId(explicitBranchId);
+      // Extract session ID from the unique branch ID if it's in the format "sess_xxx_Bx"
+      const parts = explicitBranchId.split('_');
+      if (parts.length >= 2 && parts[0] === 'sess') {
+        // Find the backend session ID by looking at the branch
+        const branch = state.currentGraphSession.branches.find(b => b.id === explicitBranchId);
+        if (branch?.backendSessionId) {
+          backendSessionId = branch.backendSessionId;
+        }
+      }
+    }
+    
+    // Find the prompt node by tracing back from parent (to get session info if not provided)
+    let currentId: string | null = parentNodeId;
+    const visited = new Set<string>();
+    while (currentId && !visited.has(currentId)) {
+      visited.add(currentId);
+      const currentNode = state.currentGraphSession.nodes.find((n) => n.id === currentId);
+      if (currentNode?.type === "prompt") {
+        // Found the prompt node - get its session info (only if not already set)
+        if (!backendSessionId && currentNode.data?.backendSessionId) {
+          backendSessionId = currentNode.data.backendSessionId;
+        }
+        // Only use prompt's branch info if no explicit branch ID was provided
+        if (!explicitBranchId) {
+          if (currentNode.data?.backendBranchId) {
+            backendBranchId = currentNode.data.backendBranchId;
+          }
+          if (currentNode.data?.uniqueBranchId) {
+            uniqueBranchId = currentNode.data.uniqueBranchId;
+          }
+          // Also check parallelSessions map
+          const parallelSession = state.parallelSessions.get(currentId);
+          if (parallelSession) {
+            backendBranchId = parallelSession.backendBranchId;
+            backendSessionId = parallelSession.backendSessionId;
+            uniqueBranchId = createUniqueBranchId(backendSessionId, backendBranchId);
+          }
+        }
+        break;
+      }
+      // Find parent via incoming edge
+      const incomingEdge = state.currentGraphSession.edges.find((e) => e.target === currentId);
+      currentId = incomingEdge ? incomingEdge.source : null;
+    }
 
-    // 이미 존재하는 노드인지 확인
+    // Create unique branch ID if not found
+    if (!uniqueBranchId && backendSessionId) {
+      uniqueBranchId = createUniqueBranchId(backendSessionId, backendBranchId);
+    }
+
+    // Generate node ID using backend session ID to ensure uniqueness across parallel sessions
+    // Format: node_image_{backendSessionId}_{step} or node_image_{graphSessionId}_{step} for backwards compatibility
+    const nodeIdPrefix = backendSessionId || sessionId;
+    const finalNodeId = nodeId || `node_image_${nodeIdPrefix}_${step}_${Date.now()}`;
+
+    console.log(`[ImageStore] addImageNode called: step=${step}, uniqueBranchId=${uniqueBranchId}, backendBranchId=${backendBranchId}, parentNodeId=${parentNodeId}, explicitBranchId=${explicitBranchId}`);
+
+    // Check for existing node with same step AND same unique branch ID (not just by node ID)
     const existingNode = state.currentGraphSession.nodes.find(
-      (n) => n.id === finalNodeId
+      (n) => n.type === "image" && 
+             n.data?.step === step && 
+             n.data?.uniqueBranchId === uniqueBranchId
     );
     if (existingNode) {
       console.log(
-        `[ImageStore] 노드가 이미 존재합니다: ${finalNodeId}, 이미지 URL 업데이트`
+        `[ImageStore] 노드가 이미 존재합니다 (step=${step}, branch=${uniqueBranchId}): ${existingNode.id}, existingNode.uniqueBranchId=${existingNode.data?.uniqueBranchId}, 이미지 URL 업데이트`
       );
-      // 기존 노드의 이미지 URL 업데이트
+      // Update existing node's image URL
       set({
         currentGraphSession: {
           ...state.currentGraphSession,
           nodes: state.currentGraphSession.nodes.map((n) =>
-            n.id === finalNodeId ? { ...n, data: { ...n.data, imageUrl }, type: "image" } : n
+            n.id === existingNode.id ? { ...n, data: { ...n.data, imageUrl }, type: "image" } : n
           ),
         },
       });
-      return finalNodeId;
+      return existingNode.id;
     }
 
-    // 같은 step의 loading node가 있는지 확인하고 교체
+    // Find loading node with same step AND same unique branch ID
     const loadingNode = state.currentGraphSession.nodes.find(
       (n) => n.type === "loading" && 
-             n.data.step === step &&
-             (!n.data.backendBranchId || n.data.backendBranchId === "B0")
+             n.data?.step === step &&
+             n.data?.uniqueBranchId === uniqueBranchId
     );
     if (loadingNode) {
       console.log(
-        `[ImageStore] Loading 노드를 이미지 노드로 교체: ${loadingNode.id} -> ${finalNodeId}`
+        `[ImageStore] Loading 노드를 이미지 노드로 교체 (step=${step}, branch=${uniqueBranchId}): ${loadingNode.id} -> ${finalNodeId}`
       );
       // Loading node를 image node로 교체
-      const updatedNodes = state.currentGraphSession.nodes.map((n) =>
+      const updatedNodes: GraphNode[] = state.currentGraphSession.nodes.map((n) =>
         n.id === loadingNode.id
           ? {
               ...n,
               id: finalNodeId,
-              type: "image",
-              data: { ...n.data, imageUrl },
+              type: "image" as const,
+              data: { ...n.data, imageUrl, backendBranchId, backendSessionId, uniqueBranchId },
             }
           : n
       );
@@ -1651,13 +1821,17 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return finalNodeId;
     }
 
-    // For main branch nodes, use "B0" as the backend branch ID
-    const backendBranchId = "B0";
-
     const newNode: GraphNode = {
       id: finalNodeId,
       type: "image",
-      data: { imageUrl, step, sessionId, backendBranchId },
+      data: { 
+        imageUrl, 
+        step, 
+        sessionId: backendSessionId || sessionId, 
+        backendBranchId,
+        backendSessionId,
+        uniqueBranchId,
+      },
       position,
     };
 
@@ -1667,21 +1841,39 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       source: parentNodeId,
       target: finalNodeId,
       type: "default",
+      data: {
+        branchId: uniqueBranchId,
+        backendBranchId,
+      },
     };
 
-    // 메인 브랜치 찾기 (sourceNodeId가 없는 브랜치)
-    const mainBranch = state.currentGraphSession.branches.find(
-      (b) => !b.sourceNodeId
-    );
+    // Find the branch for this node using unique branch ID
+    let targetBranch = uniqueBranchId 
+      ? state.currentGraphSession.branches.find((b) => b.id === uniqueBranchId)
+      : null;
+    
+    // Fallback: look for branch by backend session ID
+    if (!targetBranch && backendSessionId) {
+      targetBranch = state.currentGraphSession.branches.find(
+        (b) => b.backendSessionId === backendSessionId && b.backendBranchId === backendBranchId
+      );
+    }
+    
+    // Final fallback: find any main branch
+    if (!targetBranch) {
+      targetBranch = state.currentGraphSession.branches.find(
+        (b) => extractBackendBranchId(b.id) === "B0"
+      );
+    }
 
     set({
       currentGraphSession: {
         ...state.currentGraphSession,
         nodes: [...state.currentGraphSession.nodes, newNode],
         edges: [...state.currentGraphSession.edges, newEdge],
-        branches: mainBranch
+        branches: targetBranch
           ? state.currentGraphSession.branches.map((b) =>
-              b.id === mainBranch.id
+              b.id === targetBranch!.id
                 ? { ...b, nodes: [...b.nodes, finalNodeId] }
                 : b
             )
@@ -1690,18 +1882,19 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     });
 
     console.log(
-      `[ImageStore] 이미지 노드 추가: ${finalNodeId}, 부모: ${parentNodeId}, 스텝: ${step}`
+      `[ImageStore] 이미지 노드 추가: ${finalNodeId}, 부모: ${parentNodeId}, 스텝: ${step}, 브랜치: ${targetBranch?.id || 'none'}`
     );
     return finalNodeId;
   },
 
   // Loading node 추가 (메인 브랜치)
+  // branchId parameter is now the UNIQUE branch ID (e.g., "sess_abc123_B0")
   addLoadingNode: (
     sessionId: string,
     parentNodeId: string,
     step: number,
     position: { x: number; y: number },
-    branchId?: string
+    uniqueBranchId?: string
   ): string => {
     const state = get();
     if (
@@ -1712,11 +1905,42 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return "";
     }
 
-    const nodeId = `node_loading_${sessionId}_${step}_${Date.now()}`;
+    // Extract backend branch ID from unique branch ID
+    const backendBranchId = uniqueBranchId ? extractBackendBranchId(uniqueBranchId) : "B0";
+    
+    // Find the backend session ID from the branch or parent node
+    let backendSessionId: string | undefined;
+    if (uniqueBranchId) {
+      const branch = state.currentGraphSession.branches.find((b) => b.id === uniqueBranchId);
+      backendSessionId = branch?.backendSessionId;
+    }
+    if (!backendSessionId) {
+      // Trace back to prompt node to get session ID
+      let currentId: string | null = parentNodeId;
+      const visited = new Set<string>();
+      while (currentId && !visited.has(currentId)) {
+        visited.add(currentId);
+        const currentNode = state.currentGraphSession.nodes.find((n) => n.id === currentId);
+        if (currentNode?.type === "prompt" && currentNode.data?.backendSessionId) {
+          backendSessionId = currentNode.data.backendSessionId;
+          break;
+        }
+        const incomingEdge = state.currentGraphSession.edges.find((e) => e.target === currentId);
+        currentId = incomingEdge ? incomingEdge.source : null;
+      }
+    }
+
+    const nodeId = `node_loading_${backendSessionId || sessionId}_${step}_${Date.now()}`;
     const loadingNode: GraphNode = {
       id: nodeId,
       type: "loading",
-      data: { step, sessionId, backendBranchId: branchId },
+      data: { 
+        step, 
+        sessionId, 
+        backendBranchId, 
+        backendSessionId,
+        uniqueBranchId, // Store unique branch ID for matching
+      },
       position,
     };
 
@@ -1726,6 +1950,10 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       source: parentNodeId,
       target: nodeId,
       type: "default",
+      data: {
+        branchId: uniqueBranchId,
+        backendBranchId,
+      },
     };
 
     set({
@@ -1737,15 +1965,16 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     });
 
     console.log(
-      `[ImageStore] Loading 노드 추가: ${nodeId}, 부모: ${parentNodeId}, 스텝: ${step}`
+      `[ImageStore] Loading 노드 추가: ${nodeId}, 부모: ${parentNodeId}, 스텝: ${step}, branch: ${uniqueBranchId}`
     );
     return nodeId;
   },
 
   // Loading node 추가 (브랜치)
+  // branchId parameter is now the UNIQUE branch ID (e.g., "sess_abc123_B1")
   addLoadingNodeToBranch: (
     sessionId: string,
-    branchId: string,
+    uniqueBranchId: string,
     step: number,
     position?: { x: number; y: number }
   ): string => {
@@ -1759,26 +1988,30 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     }
 
     const branch = state.currentGraphSession.branches.find(
-      (b) => b.id === branchId
+      (b) => b.id === uniqueBranchId
     );
     if (!branch) {
-      console.warn("[ImageStore] 브랜치를 찾을 수 없습니다:", branchId);
+      console.warn("[ImageStore] 브랜치를 찾을 수 없습니다:", uniqueBranchId);
       return "";
     }
 
-    const nodeId = `node_loading_${sessionId}_${step}_${Date.now()}`;
+    // Extract backend branch ID and session ID from branch
+    const backendBranchId = branch.backendBranchId || extractBackendBranchId(uniqueBranchId);
+    const backendSessionId = branch.backendSessionId;
+
+    const nodeId = `node_loading_${backendSessionId || sessionId}_${step}_${Date.now()}`;
 
     // Calculate position using unified getBranchRowIndex
     let finalPosition: { x: number; y: number };
     if (position) {
       // If position is provided, use it but recalculate y based on rowIndex for consistency
-      const rowIndex = getBranchRowIndex(branchId, state.currentGraphSession.branches);
+      const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches);
       finalPosition = {
         x: position.x,
         y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
       };
     } else {
-      const rowIndex = getBranchRowIndex(branchId, state.currentGraphSession.branches);
+      const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches);
       finalPosition = {
         x: GRID_START_X + step * GRID_CELL_WIDTH,
         y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
@@ -1808,7 +2041,13 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     const loadingNode: GraphNode = {
       id: nodeId,
       type: "loading",
-      data: { step, sessionId, backendBranchId: branchId },
+      data: { 
+        step, 
+        sessionId, 
+        backendBranchId,
+        backendSessionId,
+        uniqueBranchId, // Store unique branch ID for matching
+      },
       position: finalPosition,
     };
 
@@ -1820,7 +2059,8 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       target: nodeId,
       type: "branch",
       data: { 
-        branchId,
+        branchId: uniqueBranchId,
+        backendBranchId,
         feedback: branchNodes.length === 0 ? branchFeedback : undefined,
       },
     };
@@ -1834,7 +2074,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     });
 
     console.log(
-      `[ImageStore] Loading 노드 추가 (브랜치): ${nodeId}, branchId: ${branchId}, 스텝: ${step}`
+      `[ImageStore] Loading 노드 추가 (브랜치): ${nodeId}, uniqueBranchId: ${uniqueBranchId}, backendBranchId: ${backendBranchId}, 스텝: ${step}`
     );
     return nodeId;
   },
@@ -1869,9 +2109,10 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   },
 
   // 브랜치에 이미지 노드 추가 (nodeId와 position은 선택적)
+  // branchId parameter is now the UNIQUE branch ID (e.g., "sess_abc123_B1")
   addImageNodeToBranch: (
     sessionId: string,
-    branchId: string,
+    uniqueBranchId: string,
     imageUrl: string,
     step: number,
     position?: { x: number; y: number },
@@ -1887,21 +2128,93 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     }
 
     const branch = state.currentGraphSession.branches.find(
-      (b) => b.id === branchId
+      (b) => b.id === uniqueBranchId
     );
     if (!branch) {
-      console.warn("[ImageStore] 브랜치를 찾을 수 없습니다:", branchId);
+      console.warn("[ImageStore] 브랜치를 찾을 수 없습니다:", uniqueBranchId);
       return "";
     }
 
-    // nodeId가 제공되지 않으면 자동 생성
+    // Get backend branch ID and session ID from the branch
+    const backendBranchId = branch.backendBranchId || extractBackendBranchId(uniqueBranchId);
+    const backendSessionId = branch.backendSessionId;
+
+    // Generate node ID using backend session ID for uniqueness
     const finalNodeId =
-      nodeId || `node_image_${sessionId}_${step}_${Date.now()}`;
+      nodeId || `node_image_${backendSessionId || sessionId}_${step}_${Date.now()}`;
+
+    // Check for existing node with same step AND same unique branch ID
+    const existingNode = state.currentGraphSession.nodes.find(
+      (n) => n.type === "image" && 
+             n.data?.step === step && 
+             n.data?.uniqueBranchId === uniqueBranchId
+    );
+    if (existingNode) {
+      console.log(
+        `[ImageStore] 브랜치 노드가 이미 존재합니다 (step=${step}, branch=${uniqueBranchId}): ${existingNode.id}, 이미지 URL 업데이트`
+      );
+      set({
+        currentGraphSession: {
+          ...state.currentGraphSession,
+          nodes: state.currentGraphSession.nodes.map((n) =>
+            n.id === existingNode.id ? { ...n, data: { ...n.data, imageUrl }, type: "image" } : n
+          ),
+        },
+      });
+      return existingNode.id;
+    }
+
+    // Find loading node with same step AND same unique branch ID
+    const loadingNode = state.currentGraphSession.nodes.find(
+      (n) => n.type === "loading" && 
+             n.data?.step === step &&
+             n.data?.uniqueBranchId === uniqueBranchId
+    );
+    if (loadingNode) {
+      console.log(
+        `[ImageStore] 브랜치 Loading 노드를 이미지 노드로 교체 (step=${step}, branch=${uniqueBranchId}): ${loadingNode.id} -> ${finalNodeId}`
+      );
+      // Loading node를 image node로 교체
+      const updatedNodes: GraphNode[] = state.currentGraphSession.nodes.map((n) =>
+        n.id === loadingNode.id
+          ? {
+              ...n,
+              id: finalNodeId,
+              type: "image" as const,
+              data: { ...n.data, imageUrl, backendBranchId, backendSessionId, uniqueBranchId },
+            }
+          : n
+      );
+      
+      // Edge의 target도 업데이트
+      const updatedEdges = state.currentGraphSession.edges.map((e) =>
+        e.target === loadingNode.id
+          ? { ...e, target: finalNodeId }
+          : e
+      );
+
+      // Update branch nodes list
+      const updatedBranches = state.currentGraphSession.branches.map((b) =>
+        b.id === uniqueBranchId 
+          ? { ...b, nodes: [...b.nodes.filter(id => id !== loadingNode.id), finalNodeId] } 
+          : b
+      );
+
+      set({
+        currentGraphSession: {
+          ...state.currentGraphSession,
+          nodes: updatedNodes,
+          edges: updatedEdges,
+          branches: updatedBranches,
+        },
+      });
+      return finalNodeId;
+    }
 
     // Calculate position using unified getBranchRowIndex
     // Always recalculate y based on rowIndex for consistency, even if position is provided
     let finalPosition: { x: number; y: number };
-    const rowIndex = getBranchRowIndex(branchId, state.currentGraphSession.branches);
+    const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches);
     if (position) {
       // If position is provided, use x from position but recalculate y based on rowIndex
       finalPosition = {
@@ -1942,35 +2255,22 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       }
     }
 
-    // 이미 존재하는 노드인지 확인
-    const existingNode = state.currentGraphSession.nodes.find(
-      (n) => n.id === finalNodeId
-    );
-    if (existingNode) {
-      console.log(
-        `[ImageStore] 노드가 이미 존재합니다: ${finalNodeId}, 이미지 URL 업데이트`
-      );
-      // 기존 노드의 이미지 URL 업데이트
-      set({
-        currentGraphSession: {
-          ...state.currentGraphSession,
-          nodes: state.currentGraphSession.nodes.map((n) =>
-            n.id === finalNodeId ? { ...n, data: { ...n.data, imageUrl } } : n
-          ),
-        },
-      });
-      return finalNodeId;
-    }
-
     console.log(
-      `[ImageStore] 새 노드 생성: nodeId=${finalNodeId}, imageUrl 길이=${
+      `[ImageStore] 새 브랜치 노드 생성: nodeId=${finalNodeId}, imageUrl 길이=${
         imageUrl ? imageUrl.length : 0
-      }, step=${step}, branchId=${branchId}`
+      }, step=${step}, uniqueBranchId=${uniqueBranchId}, backendBranchId=${backendBranchId}`
     );
     const newNode: GraphNode = {
       id: finalNodeId,
       type: "image",
-      data: { imageUrl, step, sessionId, backendBranchId: branchId },
+      data: { 
+        imageUrl, 
+        step, 
+        sessionId, 
+        backendBranchId, // Backend branch ID (e.g., "B0", "B1")
+        backendSessionId, // Backend session ID
+        uniqueBranchId, // Unique branch ID (e.g., "sess_abc123_B0")
+      },
       position: finalPosition,
     };
 
@@ -1983,7 +2283,8 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       target: finalNodeId,
       type: "branch",
       data: { 
-        branchId,
+        branchId: uniqueBranchId, // Unique branch ID
+        backendBranchId, // Backend branch ID
         // Include feedback for the first edge of the branch (from parent to first node)
         feedback: branchNodes.length === 0 ? branchFeedback : undefined,
       },
@@ -1995,13 +2296,13 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         nodes: [...state.currentGraphSession.nodes, newNode],
         edges: [...state.currentGraphSession.edges, newEdge],
         branches: state.currentGraphSession.branches.map((b) =>
-          b.id === branchId ? { ...b, nodes: [...b.nodes, finalNodeId] } : b
+          b.id === uniqueBranchId ? { ...b, nodes: [...b.nodes, finalNodeId] } : b
         ),
       },
     });
 
     console.log(
-      `[ImageStore] 브랜치 이미지 노드 추가: ${finalNodeId}, 브랜치: ${branchId}, 부모: ${parentNodeId}, 스텝: ${step}`
+      `[ImageStore] 브랜치 이미지 노드 추가: ${finalNodeId}, 브랜치: ${uniqueBranchId}, 부모: ${parentNodeId}, 스텝: ${step}`
     );
     return finalNodeId;
   },
@@ -2362,5 +2663,202 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     });
     
     console.log(`[ImageStore] Removed ${nodesToRemove.size} nodes, ${nodes.length - newNodes.length} remaining`);
+  },
+
+  // Register a parallel session for a prompt node
+  registerParallelSession: (promptNodeId: string, backendSessionId: string, backendBranchId: string) => {
+    const state = get();
+    const newMap = new Map(state.parallelSessions);
+    newMap.set(promptNodeId, { backendSessionId, backendBranchId });
+    set({ parallelSessions: newMap });
+    console.log(`[ImageStore] Registered parallel session for prompt ${promptNodeId}: session=${backendSessionId}, branch=${backendBranchId}`);
+  },
+
+  // Get backend session info for a node (traces back to its prompt node)
+  getBackendSessionForNode: (nodeId: string) => {
+    const state = get();
+    if (!state.currentGraphSession) return null;
+    
+    const { nodes, edges } = state.currentGraphSession;
+    const node = nodes.find((n) => n.id === nodeId);
+    if (!node) return null;
+    
+    // If this is a prompt node with its own backend session, use it
+    if (node.type === "prompt") {
+      // Check parallelSessions map first
+      const parallelSession = state.parallelSessions.get(nodeId);
+      if (parallelSession) {
+        return { sessionId: parallelSession.backendSessionId, branchId: parallelSession.backendBranchId };
+      }
+      // Check node data
+      if (node.data?.backendSessionId) {
+        return { 
+          sessionId: node.data.backendSessionId, 
+          branchId: node.data.backendBranchId || "B0" 
+        };
+      }
+    }
+    
+    // If this node has a backendSessionId directly, use it
+    if (node.data?.backendSessionId) {
+      return { 
+        sessionId: node.data.backendSessionId, 
+        branchId: node.data.backendBranchId || "B0" 
+      };
+    }
+    
+    // Trace back to find the root prompt node for this branch
+    let currentId: string | null = nodeId;
+    const visited = new Set<string>();
+    
+    while (currentId && !visited.has(currentId)) {
+      visited.add(currentId);
+      const currentNode = nodes.find((n) => n.id === currentId);
+      
+      if (currentNode?.type === "prompt") {
+        // Check parallelSessions map
+        const parallelSession = state.parallelSessions.get(currentId);
+        if (parallelSession) {
+          return { sessionId: parallelSession.backendSessionId, branchId: parallelSession.backendBranchId };
+        }
+        // Check node data
+        if (currentNode.data?.backendSessionId) {
+          return { 
+            sessionId: currentNode.data.backendSessionId, 
+            branchId: currentNode.data.backendBranchId || "B0" 
+          };
+        }
+      }
+      
+      // Find parent via incoming edge
+      const incomingEdge = edges.find((e) => e.target === currentId);
+      if (incomingEdge) {
+        currentId = incomingEdge.source;
+      } else {
+        break;
+      }
+    }
+    
+    // Fall back to the global backend session ID
+    if (state.backendSessionId) {
+      return { sessionId: state.backendSessionId, branchId: state.backendActiveBranchId || "B0" };
+    }
+    
+    return null;
+  },
+
+  // Add a new prompt node for parallel session
+  addPromptNodeToGraph: (
+    prompt: string,
+    backendSessionId: string,
+    backendBranchId: string,
+    bboxes?: BoundingBox[],
+    sketchLayers?: SketchLayer[],
+    position?: { x: number; y: number },
+    placeholderNodeId?: string
+  ): string | null => {
+    const state = get();
+    if (!state.currentGraphSession) {
+      console.warn("[ImageStore] Cannot add prompt node: no graph session");
+      return null;
+    }
+
+    // Find existing prompt nodes to calculate row index
+    const existingPromptNodes = state.currentGraphSession.nodes.filter(
+      (n) => n.type === "prompt"
+    );
+    const newRowIndex = existingPromptNodes.length;
+    
+    // Calculate position for new prompt node
+    let newPosition: { x: number; y: number };
+    if (position) {
+      newPosition = position;
+    } else if (placeholderNodeId) {
+      // Use placeholder node's position if converting
+      const placeholderNode = state.currentGraphSession.nodes.find(
+        (n) => n.id === placeholderNodeId && n.type === "placeholder"
+      );
+      if (placeholderNode) {
+        newPosition = placeholderNode.position;
+      } else {
+        // Default position based on row index
+        newPosition = {
+          x: GRID_START_X - GRID_CELL_WIDTH,
+          y: GRID_START_Y + newRowIndex * GRID_CELL_HEIGHT,
+        };
+      }
+    } else {
+      // Default position based on row index
+      newPosition = {
+        x: GRID_START_X - GRID_CELL_WIDTH,
+        y: GRID_START_Y + newRowIndex * GRID_CELL_HEIGHT,
+      };
+    }
+
+    // Create unique branch ID for this session
+    const uniqueBranchId = createUniqueBranchId(backendSessionId, backendBranchId);
+
+    // Create new prompt node with backend session info
+    const promptNodeId = placeholderNodeId || `node_prompt_${Date.now()}`;
+    const newPromptNode: GraphNode = {
+      id: promptNodeId,
+      type: "prompt",
+      data: {
+        prompt,
+        backendSessionId,
+        backendBranchId, // Backend branch ID (e.g., "B0")
+        uniqueBranchId, // Unique branch ID (e.g., "sess_abc123_B0")
+        rowIndex: newRowIndex,
+        compositionData:
+          (bboxes && bboxes.length > 0) ||
+          (sketchLayers && sketchLayers.length > 0)
+            ? {
+                bboxes: bboxes || [],
+                sketchLayers: sketchLayers || [],
+              }
+            : undefined,
+      },
+      position: newPosition,
+    };
+
+    // Create a branch for this prompt node's session with unique ID
+    const newBranch: Branch = {
+      id: uniqueBranchId,
+      backendBranchId,
+      backendSessionId,
+      sourceNodeId: promptNodeId,
+      feedback: [],
+      nodes: [],
+    };
+
+    // Update or add the node
+    let updatedNodes: GraphNode[];
+    if (placeholderNodeId) {
+      // Convert placeholder to prompt node
+      updatedNodes = state.currentGraphSession.nodes.map((n) =>
+        n.id === placeholderNodeId ? newPromptNode : n
+      );
+      console.log(`[ImageStore] Converted placeholder ${placeholderNodeId} to prompt node`);
+    } else {
+      // Add new prompt node
+      updatedNodes = [...state.currentGraphSession.nodes, newPromptNode];
+    }
+
+    // Update the graph session
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        nodes: updatedNodes,
+        branches: [...state.currentGraphSession.branches, newBranch],
+      },
+    });
+
+    // Register the parallel session
+    const newMap = new Map(state.parallelSessions);
+    newMap.set(promptNodeId, { backendSessionId, backendBranchId });
+    set({ parallelSessions: newMap });
+
+    console.log(`[ImageStore] Added new prompt node: ${promptNodeId} with backend session: ${backendSessionId}, branch: ${backendBranchId}, row: ${newRowIndex}`);
+    return promptNodeId;
   },
 }));

@@ -301,6 +301,9 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
     removeBbox,
     clearComposition,
     createGraphSession,
+    currentGraphSession,
+    addPromptNodeToGraph,
+    registerParallelSession,
   } = useImageStore();
 
   const [currentPrompt, setCurrentPrompt] = useState<string>("");
@@ -444,26 +447,71 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
       const sessionId = startResp.session_id;
       const activeBranchId = startResp.active_branch_id;
 
-      // 그래프 세션 생성 (루트 노드는 프롬프트)
-      const graphSessionId = createGraphSession(
-        currentPrompt,
-        sessionId,
-        compositionMode === "bbox" && compositionState.bboxes.length > 0
-          ? compositionState.bboxes
-          : undefined,
-        compositionMode === "sketch" && sketchLayers.length > 0
-          ? sketchLayers
-          : undefined
-      );
+      // Check if there's already a graph session (for parallel sessions)
+      if (currentGraphSession && currentGraphSession.nodes.length > 0) {
+        // Add new prompt node to existing graph session (parallel session)
+        console.log("[CompositionModal] Adding parallel session to existing graph");
+        
+        // Find any existing placeholder node to convert
+        const placeholderNode = currentGraphSession.nodes.find(
+          (n) => n.type === "placeholder"
+        );
+        const placeholderNodeId = placeholderNode?.id;
+        
+        if (placeholderNodeId) {
+          console.log("[CompositionModal] Found placeholder node to convert:", placeholderNodeId);
+        }
+        
+        const promptNodeId = addPromptNodeToGraph(
+          currentPrompt,
+          sessionId,
+          activeBranchId,
+          compositionMode === "bbox" && compositionState.bboxes.length > 0
+            ? compositionState.bboxes
+            : undefined,
+          compositionMode === "sketch" && sketchLayers.length > 0
+            ? sketchLayers
+            : undefined,
+          placeholderNode?.position, // Use placeholder position if available
+          placeholderNodeId // Pass placeholder node ID to convert it
+        );
+        
+        if (promptNodeId) {
+          console.log("[CompositionModal] 병렬 세션 프롬프트 노드 생성:", promptNodeId);
+          // Register the parallel session
+          registerParallelSession(promptNodeId, sessionId, activeBranchId);
+        }
+      } else {
+        // Create new graph session (first session)
+        const graphSessionId = createGraphSession(
+          currentPrompt,
+          sessionId,
+          undefined, // rootNodeId
+          compositionMode === "bbox" && compositionState.bboxes.length > 0
+            ? compositionState.bboxes
+            : undefined,
+          compositionMode === "sketch" && sketchLayers.length > 0
+            ? sketchLayers
+            : undefined
+        );
 
-      console.log("[CompositionModal] 그래프 세션 생성 완료:", {
-        graphSessionId,
-        sessionId,
-      });
+        console.log("[CompositionModal] 그래프 세션 생성 완료:", {
+          graphSessionId,
+          sessionId,
+        });
+        
+        // Register the first session as well
+        const promptNode = useImageStore.getState().currentGraphSession?.nodes.find(
+          (n) => n.type === "prompt"
+        );
+        if (promptNode) {
+          registerParallelSession(promptNode.id, sessionId, activeBranchId);
+        }
+      }
 
       // 자동 진행은 하지 않고 Next Step 버튼으로 사용자 승인 시 진행
       useImageStore.getState().setBackendSessionMeta(sessionId, activeBranchId);
-      console.log("[CompositionModal] 그래프 세션 생성:", graphSessionId);
+      console.log("[CompositionModal] 세션 메타 설정 완료:", sessionId);
 
       if (onComplete) {
         onComplete();

@@ -74,7 +74,9 @@ export interface GraphNode {
     imageUrl?: string;
     step?: number;
     sessionId?: string;
-    backendBranchId?: string; // Backend branch ID for this node
+    backendBranchId?: string; // Backend branch ID for this node (e.g., "B0", "B1")
+    backendSessionId?: string; // Backend session ID (for prompt nodes with parallel sessions)
+    uniqueBranchId?: string; // Unique branch ID combining session + branch (e.g., "session123_B0")
     mergedFrom?: [string, string]; // Source node IDs if this is a merged node
     // Composition 데이터 (루트 노드에만 저장)
     compositionData?: {
@@ -83,6 +85,8 @@ export interface GraphNode {
     };
     // Placeholder node 관련
     onClick?: () => void; // Placeholder node 클릭 핸들러
+    // Row index for parallel prompt nodes
+    rowIndex?: number;
   };
   position: { x: number; y: number };
 }
@@ -94,13 +98,16 @@ export interface GraphEdge {
   type?: 'default' | 'branch';
   data?: {
     feedback?: FeedbackRecord[];
-    branchId?: string;
+    branchId?: string; // Unique branch ID (e.g., "session123_B0")
+    backendBranchId?: string; // Backend branch ID (e.g., "B0")
     isMergeEdge?: boolean; // True if this edge is part of a merge
   };
 }
 
 export interface Branch {
-  id: string;
+  id: string; // Unique branch ID (e.g., "session123_B0")
+  backendBranchId?: string; // Backend branch ID (e.g., "B0")
+  backendSessionId?: string; // Backend session ID this branch belongs to
   sourceNodeId: string; // 브랜치가 시작된 노드
   feedback: FeedbackRecord[];
   nodes: string[]; // 이 브랜치에 속한 노드 ID들

@@ -1,5 +1,4 @@
 import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
-import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
 import ReactFlow, {
   type Node,
   type Edge,
@@ -14,7 +13,7 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import styled, { createGlobalStyle } from "styled-components";
-import { useImageStore, getBranchRowIndex } from "../stores/imageStore";
+import { useImageStore, getBranchRowIndex, extractBackendBranchId, createUniqueBranchId } from "../stores/imageStore";
 import { USE_MOCK_MODE } from "../config/api";
 import { connectImageStream } from "../api/websocket";
 import { type GraphNode } from "../types";
@@ -322,6 +321,22 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   
   // Store original positions for snap-back
   const originalPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  
+  // Track which nodes have been manually moved (prompt nodes and their children)
+  // These nodes should use their stored position instead of grid calculation
+  const movedNodesRef = useRef<Set<string>>(new Set());
+  
+  // Track prompt offset from original grid position - used to offset new nodes added to moved prompts
+  // Key: prompt node ID, Value: { deltaX, deltaY } offset from original grid position
+  const promptOffsetRef = useRef<Map<string, { deltaX: number; deltaY: number }>>(new Map());
+  
+  // Track prompt node dragging for moving child nodes together
+  const draggingPromptRef = useRef<{
+    nodeId: string;
+    startPosition: { x: number; y: number };
+    childNodeIds: string[];
+    childStartPositions: Map<string, { x: number; y: number }>;
+  } | null>(null);
 
   // 초기 렌더링 시 빈 GraphSession 생성
   useEffect(() => {
@@ -412,155 +427,126 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     [currentGraphSession]
   );
 
-  // Helper to get branch ID from a node
+  // Helper to get unique branch ID from a node
+  // Returns the uniqueBranchId (e.g., "sess_abc123_B0") for proper filtering across parallel sessions
   const getNodeBranchId = useCallback(
     (nodeId: string): string | null => {
       if (!currentGraphSession) return null;
       const node = currentGraphSession.nodes.find((n) => n.id === nodeId);
-      if (node?.data?.backendBranchId) {
-        return node.data.backendBranchId as string;
+      
+      // Priority: uniqueBranchId > edge branchId > backendBranchId
+      if (node?.data?.uniqueBranchId) {
+        return node.data.uniqueBranchId as string;
       }
-      // Fallback to edge data
+      
+      // Fallback to edge data (which now stores unique branch ID)
       const incoming = currentGraphSession.edges.find((e) => e.target === nodeId);
       if (incoming?.data?.branchId) {
         return incoming.data.branchId as string;
       }
-      // Default to B0 for main branch
-      return "B0";
+      
+      // Legacy fallback: construct unique ID from backendBranchId and backendSessionId
+      if (node?.data?.backendBranchId && node?.data?.backendSessionId) {
+        return createUniqueBranchId(node.data.backendSessionId as string, node.data.backendBranchId as string);
+      }
+      
+      // Final fallback to backendBranchId (for backwards compatibility)
+      if (node?.data?.backendBranchId) {
+        return node.data.backendBranchId as string;
+      }
+      
+      // Default to null (unknown branch)
+      return null;
     },
     [currentGraphSession]
   );
 
-  // Get all nodes in the same branch as the selected node (both ancestors and descendants)
-  const getFullBranchNodes = useCallback(
+  // Get the full trajectory of a node: all ancestors (parents) and all descendants (children)
+  // This highlights the complete path from root to all leaf nodes through the selected node
+  const getFullTrajectory = useCallback(
     (nodeId: string): string[] => {
       if (!currentGraphSession) return [];
 
-      const selectedBranchId = getNodeBranchId(nodeId);
-      if (!selectedBranchId) return [nodeId];
-
-      const branchNodes: string[] = [];
+      const trajectoryNodes: string[] = [];
       const visited = new Set<string>();
 
-      // First, find all nodes that belong to this branch
-      // For main branch (B0), we need to trace the main path
-      // For other branches, we find nodes with matching branchId
+      // 1. Get all ancestors (trace back to root)
+      const ancestors: string[] = [];
+      let currentId: string | null = nodeId;
+      while (currentId) {
+        if (visited.has(currentId)) break;
+        ancestors.unshift(currentId); // Add to front to maintain order from root
+        visited.add(currentId);
+        
+        // Find parent via incoming edge
+        const incomingEdge = currentGraphSession.edges.find((e) => e.target === currentId);
+        currentId = incomingEdge ? incomingEdge.source : null;
+      }
+      
+      // Add ancestors to trajectory
+      trajectoryNodes.push(...ancestors);
 
-      if (selectedBranchId === "B0") {
-        // For main branch, trace from root to the end of main branch
-        // Start from the prompt node and follow edges that are not branch edges
-        const promptNode = currentGraphSession.nodes.find((n) => n.type === "prompt");
-        if (promptNode) {
-          branchNodes.push(promptNode.id);
-          visited.add(promptNode.id);
-
-          // Follow main branch edges (non-branch type edges or edges without branchId)
-          let currentNodeId: string | null = promptNode.id;
-          while (currentNodeId) {
-            const outgoingEdges = currentGraphSession.edges.filter(
-              (e) => e.source === currentNodeId
-            );
-            
-            // Find the main branch edge (type !== 'branch' or no branchId)
-            const mainEdge = outgoingEdges.find(
-              (e) => e.type !== "branch" || !e.data?.branchId
-            );
-            
-            if (mainEdge && !visited.has(mainEdge.target)) {
-              branchNodes.push(mainEdge.target);
-              visited.add(mainEdge.target);
-              currentNodeId = mainEdge.target;
-            } else {
-              break;
-            }
-          }
-        }
-      } else {
-        // For non-main branches, start from sourceNodeId and follow branch edges
-        // Find the branch source node (where this branch started)
-        const branch = currentGraphSession.branches.find((b) => b.id === selectedBranchId);
-        const branchSourceNodeId = branch?.sourceNodeId;
-
-        if (branchSourceNodeId) {
-          // Check if this is a merge branch by looking for merge edges from sourceNodeId
-          // Merge branches have sourceNodeId that is already the actual start node
-          // (the edge from sourceNodeId to the merged node has isMergeEdge === true)
-          const mergeEdge = currentGraphSession.edges.find(
-            (e) => e.source === branchSourceNodeId && 
-                   e.type === "branch" && 
-                   e.data?.branchId === selectedBranchId &&
-                   e.data?.isMergeEdge === true
-          );
-          const isMergeBranch = !!mergeEdge;
-
-          let actualBranchStartNodeId: string;
-          if (isMergeBranch) {
-            // For merge branches, sourceNodeId is already the actual start node
-            // (it's the parent node of the merged sources, e.g., A-1)
-            actualBranchStartNodeId = branchSourceNodeId;
-          } else {
-            // For regular branching, the first branch node connects to the parent of sourceNodeId
-            // So we need to find the parent (e.g., if sourceNodeId is A, parent is A-1)
-            const sourceEdge = currentGraphSession.edges.find(
-              (e) => e.target === branchSourceNodeId
-            );
-            actualBranchStartNodeId = sourceEdge ? sourceEdge.source : branchSourceNodeId;
-          }
-
-          // Include the path from actual branch start to root (ancestor nodes in main branch)
-          const ancestorPath = getPathToRoot(actualBranchStartNodeId);
-          for (const ancestorId of ancestorPath) {
-            if (!visited.has(ancestorId)) {
-              branchNodes.push(ancestorId);
-              visited.add(ancestorId);
-            }
-          }
-
-          // Start from actualBranchStartNodeId and follow ONLY branch edges for this specific branch
-          // This ensures we only include nodes that are actually in this branch
-          // and excludes nodes from the original branch (like node A)
-          const branchNodeQueue: string[] = [actualBranchStartNodeId];
-          
-          while (branchNodeQueue.length > 0) {
-            const currentNodeId = branchNodeQueue.shift();
-            if (!currentNodeId || visited.has(currentNodeId)) continue;
-
-            // Add current node (actualBranchStartNodeId is always part of the branch)
-            if (!visited.has(currentNodeId)) {
-              branchNodes.push(currentNodeId);
-              visited.add(currentNodeId);
-            }
-
-            // Follow ONLY edges that are explicitly marked as branch edges for this branch
-            const outgoingEdges = currentGraphSession.edges.filter(
-              (e) => e.source === currentNodeId
-            );
-
-            for (const edge of outgoingEdges) {
-              // Only follow edges that are explicitly branch edges for this branch
-              // This excludes edges from the original branch (which would have different branchId or no branchId)
-              const isBranchEdge = edge.type === "branch" && edge.data?.branchId === selectedBranchId;
-              
-              if (isBranchEdge && !visited.has(edge.target)) {
-                branchNodeQueue.push(edge.target);
-              }
-            }
-          }
-        } else {
-          // Fallback: if no sourceNodeId, use old logic (shouldn't happen normally)
-          for (const node of currentGraphSession.nodes) {
-            const nodeBranchId = getNodeBranchId(node.id);
-            if (nodeBranchId === selectedBranchId) {
-              branchNodes.push(node.id);
-              visited.add(node.id);
-            }
+      // 2. Get all descendants (BFS from selected node)
+      const queue: string[] = [nodeId];
+      const descendantVisited = new Set<string>([nodeId]); // nodeId already in ancestors
+      
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        
+        // Find all children via outgoing edges
+        const outgoingEdges = currentGraphSession.edges.filter((e) => e.source === current);
+        
+        for (const edge of outgoingEdges) {
+          if (!descendantVisited.has(edge.target) && !visited.has(edge.target)) {
+            descendantVisited.add(edge.target);
+            visited.add(edge.target);
+            trajectoryNodes.push(edge.target);
+            queue.push(edge.target);
           }
         }
       }
 
-      return branchNodes;
+      return trajectoryNodes;
     },
-    [currentGraphSession, getNodeBranchId, getPathToRoot]
+    [currentGraphSession]
+  );
+
+  // Legacy function for branch-based selection (kept for compatibility)
+  const getFullBranchNodes = useCallback(
+    (nodeId: string): string[] => {
+      // Now delegates to getFullTrajectory for consistent behavior
+      return getFullTrajectory(nodeId);
+    },
+    [getFullTrajectory]
+  );
+
+  // Get all descendants (children) of a node - used for moving prompt node with its children
+  const getAllDescendants = useCallback(
+    (nodeId: string): string[] => {
+      if (!currentGraphSession) return [];
+
+      const descendants: string[] = [];
+      const visited = new Set<string>([nodeId]);
+      const queue: string[] = [nodeId];
+      
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        
+        // Find all children via outgoing edges
+        const outgoingEdges = currentGraphSession.edges.filter((e) => e.source === current);
+        
+        for (const edge of outgoingEdges) {
+          if (!visited.has(edge.target)) {
+            visited.add(edge.target);
+            descendants.push(edge.target);
+            queue.push(edge.target);
+          }
+        }
+      }
+
+      return descendants;
+    },
+    [currentGraphSession]
   );
 
   // Get all edges in the full branch
@@ -582,11 +568,12 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     [currentGraphSession]
   );
 
-  // 선택된 노드의 전체 브랜치 계산 (ancestors + descendants)
+  // 선택된 노드의 전체 trajectory 계산 (모든 ancestors + 모든 descendants)
+  // This highlights the complete path from root through the selected node to all its children
   const selectedBranchNodeIds = useMemo(() => {
     if (!selectedNodeId || !currentGraphSession) return new Set<string>();
-    const branchNodes = getFullBranchNodes(selectedNodeId);
-    return new Set(branchNodes);
+    const trajectoryNodes = getFullBranchNodes(selectedNodeId);
+    return new Set(trajectoryNodes);
   }, [selectedNodeId, currentGraphSession, getFullBranchNodes]);
 
   const selectedBranchEdgeIds = useMemo(() => {
@@ -665,6 +652,26 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     };
   }, []);
 
+  // Calculate position for a new node, applying prompt offset if the prompt has been moved
+  const calculatePositionWithOffset = useCallback(
+    (step: number, rowIndex: number, promptNodeId: string | null): { x: number; y: number } => {
+      const basePosition = calculateGridPosition(step, rowIndex);
+      
+      if (promptNodeId) {
+        const offset = promptOffsetRef.current.get(promptNodeId);
+        if (offset) {
+          return {
+            x: basePosition.x + offset.deltaX,
+            y: basePosition.y + offset.deltaY,
+          };
+        }
+      }
+      
+      return basePosition;
+    },
+    [calculateGridPosition]
+  );
+
   // Get branch row index using unified function from imageStore
   const getBranchRowIndexLocal = useCallback((branchId: string): number => {
     if (!currentGraphSession) return 0;
@@ -699,26 +706,92 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       console.log(`[GraphCanvas] Branch ${branch.id}: rowIndex=${rowIndex}, y=${yPos}, nodes=${branch.nodes.length}`);
     });
     
+    // Helper to find the prompt node for a given node by tracing back through edges
+    const findPromptNodeId = (nodeId: string): string | null => {
+      let currentId: string | null = nodeId;
+      const visited = new Set<string>();
+      
+      while (currentId && !visited.has(currentId)) {
+        visited.add(currentId);
+        const currentNode = currentGraphSession.nodes.find((n) => n.id === currentId);
+        if (currentNode?.type === "prompt") {
+          return currentId;
+        }
+        // Find parent via incoming edge
+        const incomingEdge = currentGraphSession.edges.find((e) => e.target === currentId);
+        currentId = incomingEdge ? incomingEdge.source : null;
+      }
+      
+      return null;
+    };
+    
     const nodeList = currentGraphSession.nodes.map((node) => {
       const isInBranch = selectedBranchNodeIds.has(node.id);
       const isSelected = selectedNodeId === node.id;
       const isMergeTarget = node.id === potentialMergeTargetId;
       const isRightmost = node.id === rightmostBranchNodeId;
       
-      // Calculate fixed grid position based on step and branch
+      // Find the prompt node for this node (to check if it has been moved)
+      const promptNodeId = node.type === "prompt" ? node.id : findPromptNodeId(node.id);
+      const promptOffset = promptNodeId ? promptOffsetRef.current.get(promptNodeId) : null;
+      const hasPromptBeenMoved = !!promptOffset;
+      
+      // Calculate position - check if node has been manually moved first
       let fixedPosition = node.position;
-      if (node.type === "image") {
+      const hasBeenMoved = movedNodesRef.current.has(node.id);
+      
+      if (hasBeenMoved) {
+        // Use the stored position from the store (which was updated when dragged)
+        fixedPosition = node.position;
+      } else if (node.type === "image") {
         const step = node.data?.step ?? 0;
         const branchId = getNodeBranchId(node.id) || "B0";
         const rowIndex = getBranchRowIndexLocal(branchId);
-        fixedPosition = calculateGridPosition(step, rowIndex);
+        let basePosition = calculateGridPosition(step, rowIndex);
+        // Apply prompt offset if the prompt has been moved
+        if (hasPromptBeenMoved && promptOffset) {
+          basePosition = {
+            x: basePosition.x + promptOffset.deltaX,
+            y: basePosition.y + promptOffset.deltaY,
+          };
+        }
+        fixedPosition = basePosition;
       } else if (node.type === "prompt") {
         // Prompt node at column -1 (before step 0)
-        fixedPosition = { x: GRID_START_X - GRID_CELL_WIDTH, y: GRID_START_Y };
+        // Use rowIndex from node data for parallel prompt nodes
+        const promptRowIndex = node.data?.rowIndex ?? 0;
+        let basePosition = { 
+          x: GRID_START_X - GRID_CELL_WIDTH, 
+          y: GRID_START_Y + promptRowIndex * GRID_CELL_HEIGHT 
+        };
+        // Apply prompt offset if this prompt has been moved
+        if (hasPromptBeenMoved && promptOffset) {
+          basePosition = {
+            x: basePosition.x + promptOffset.deltaX,
+            y: basePosition.y + promptOffset.deltaY,
+          };
+        }
+        fixedPosition = basePosition;
+      } else if (node.type === "loading") {
+        // Loading nodes use the same positioning as image nodes
+        const step = node.data?.step ?? 0;
+        const branchId = getNodeBranchId(node.id) || "B0";
+        const rowIndex = getBranchRowIndexLocal(branchId);
+        let basePosition = calculateGridPosition(step, rowIndex);
+        // Apply prompt offset if the prompt has been moved
+        if (hasPromptBeenMoved && promptOffset) {
+          basePosition = {
+            x: basePosition.x + promptOffset.deltaX,
+            y: basePosition.y + promptOffset.deltaY,
+          };
+        }
+        fixedPosition = basePosition;
       }
       
-      // Store for snap-back
-      newOriginalPositions.set(node.id, fixedPosition);
+      // Store for snap-back (only for non-moved nodes that don't have a moved prompt)
+      if (!hasBeenMoved && !hasPromptBeenMoved) {
+        newOriginalPositions.set(node.id, fixedPosition);
+      }
       
       // Determine node style based on state
       let nodeStyle: React.CSSProperties | undefined;
@@ -944,6 +1017,48 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         return;
       }
 
+      // Prompt node - save new position for prompt and all children
+      if (graphNode?.type === "prompt" && draggingPromptRef.current?.nodeId === node.id) {
+        const { startPosition, childNodeIds, childStartPositions } = draggingPromptRef.current;
+        
+        // Calculate delta from start position
+        const deltaX = node.position.x - startPosition.x;
+        const deltaY = node.position.y - startPosition.y;
+        
+        // Get or accumulate the total offset for this prompt
+        const existingOffset = promptOffsetRef.current.get(node.id) || { deltaX: 0, deltaY: 0 };
+        const totalOffset = {
+          deltaX: existingOffset.deltaX + deltaX,
+          deltaY: existingOffset.deltaY + deltaY,
+        };
+        promptOffsetRef.current.set(node.id, totalOffset);
+        
+        // Update prompt node position in store and mark as moved
+        updateNodePosition(currentGraphSession.id, node.id, node.position);
+        originalPositionsRef.current.set(node.id, node.position);
+        movedNodesRef.current.add(node.id);
+        
+        // Update all child node positions in store and mark as moved
+        for (const childId of childNodeIds) {
+          const childStart = childStartPositions.get(childId);
+          if (childStart) {
+            const newChildPos = {
+              x: childStart.x + deltaX,
+              y: childStart.y + deltaY,
+            };
+            updateNodePosition(currentGraphSession.id, childId, newChildPos);
+            originalPositionsRef.current.set(childId, newChildPos);
+            movedNodesRef.current.add(childId);
+          }
+        }
+        
+        console.log(`[GraphCanvas] Prompt node ${node.id} moved by (${deltaX}, ${deltaY}), total offset: (${totalOffset.deltaX}, ${totalOffset.deltaY}), updated ${childNodeIds.length} children`);
+        
+        // Clear the dragging ref
+        draggingPromptRef.current = null;
+        return;
+      }
+
       // Check for merge target (이미지 노드인 경우에만)
       const mergeTarget = findMergeTarget(node);
       if (mergeTarget) {
@@ -962,6 +1077,9 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           )
         );
       }
+      
+      // Clear dragging ref if it was set (safety cleanup)
+      draggingPromptRef.current = null;
     },
     [currentGraphSession, findMergeTarget, setNodes, updateNodePosition]
   );
@@ -970,99 +1088,147 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const handleMergeConfirm = useCallback(async () => {
     if (!mergeSourceNode || !mergeTargetNode || !currentGraphSession) return;
 
-    const sessionId = backendSessionId || currentGraphSession.id;
-    const sourceBranchId = getNodeBranchId(mergeSourceNode.id);
-    const targetBranchId = getNodeBranchId(mergeTargetNode.id);
+    // Get the correct backend session ID for the source node (both nodes should be from the same session for merge)
+    const { getBackendSessionForNode } = useImageStore.getState();
+    const sourceNodeSession = getBackendSessionForNode(mergeSourceNode.id);
+    const targetNodeSession = getBackendSessionForNode(mergeTargetNode.id);
+    
+    // Verify both nodes are from the same session (merging across sessions is not supported)
+    if (sourceNodeSession?.sessionId !== targetNodeSession?.sessionId) {
+      console.error("[GraphCanvas] Cannot merge: nodes are from different sessions");
+      alert("Cannot merge nodes from different sessions");
+      setMergeConfirmVisible(false);
+      return;
+    }
+    
+    const sessionId = sourceNodeSession?.sessionId || backendSessionId || currentGraphSession.id;
+    
+    // Get unique branch IDs for frontend operations
+    const sourceUniqueBranchId = getNodeBranchId(mergeSourceNode.id);
+    const targetUniqueBranchId = getNodeBranchId(mergeTargetNode.id);
+    
+    // Extract backend branch IDs for API call
+    const sourceBackendBranchId = sourceUniqueBranchId ? extractBackendBranchId(sourceUniqueBranchId) : null;
+    const targetBackendBranchId = targetUniqueBranchId ? extractBackendBranchId(targetUniqueBranchId) : null;
+    
     const sourceStep = mergeSourceNode.data?.step;
     const targetStep = mergeTargetNode.data?.step;
 
-    if (!sourceBranchId || !targetBranchId || sourceStep === undefined || targetStep === undefined) {
+    if (!sourceBackendBranchId || !targetBackendBranchId || sourceStep === undefined || targetStep === undefined) {
       console.error("[GraphCanvas] Cannot merge: missing branch ID or step");
       setMergeConfirmVisible(false);
       return;
     }
 
     console.log(
-      `[GraphCanvas] Merging branches: ${sourceBranchId}@${sourceStep} + ${targetBranchId}@${targetStep}`
+      `[GraphCanvas] Merging branches: session=${sessionId}, unique=${sourceUniqueBranchId}@${sourceStep} + ${targetUniqueBranchId}@${targetStep}, backend=${sourceBackendBranchId} + ${targetBackendBranchId}`
     );
 
     setIsMerging(true);
+    
+    // Use the graph session ID for graph operations
+    const graphSessionId = currentGraphSession.id;
+    
+    // Calculate merge start step (before API call, for loading node)
+    const mergeStartStep = Math.max(sourceStep, targetStep);
+    
+    // Calculate row index for the new branch
+    const nonMainBranches = currentGraphSession.branches.filter((b) => b.id !== "B0");
+    const newBranchRowIndex = nonMainBranches.length + 1; // +1 because main branch is row 0
+    
+    // Calculate position for loading/merged node
+    let mergeNodePosition: { x: number; y: number };
+    if (mergePlaceholderNodeId) {
+      const placeholderNode = currentGraphSession.nodes.find(
+        (n) => n.id === mergePlaceholderNodeId
+      );
+      if (placeholderNode) {
+        mergeNodePosition = placeholderNode.position;
+        console.log(`[GraphCanvas] Using placeholder node position:`, mergeNodePosition);
+      } else {
+        mergeNodePosition = calculateGridPosition(mergeStartStep, newBranchRowIndex);
+      }
+    } else {
+      mergeNodePosition = calculateGridPosition(mergeStartStep, newBranchRowIndex);
+    }
+    
+    // Add loading node BEFORE API call to show progress
+    // We'll create a temporary branch ID for the loading node
+    const tempBranchId = `merge_pending_${Date.now()}`;
+    const { addLoadingNode, removeLoadingNode } = useImageStore.getState();
+    
+    // Find PARENT nodes of the source nodes (for edge connection)
+    const sourceEdge1 = currentGraphSession.edges.find((e) => e.target === mergeSourceNode.id);
+    const parentNodeId1 = sourceEdge1 ? sourceEdge1.source : mergeSourceNode.id;
+    
+    const loadingNodeId = addLoadingNode(
+      graphSessionId,
+      parentNodeId1, // Connect to parent of first source
+      mergeStartStep,
+      mergeNodePosition,
+      tempBranchId
+    );
+    console.log(`[GraphCanvas] Added loading node for merge: ${loadingNodeId}`);
+    
     try {
+      // Use backend branch IDs for API call
       const result = await mergeBranches({
         session_id: sessionId,
-        branch_id_1: sourceBranchId,
-        branch_id_2: targetBranchId,
+        branch_id_1: sourceBackendBranchId,
+        branch_id_2: targetBackendBranchId,
         step_index_1: sourceStep,
         step_index_2: targetStep,
         merge_weight: 0.5,
       });
 
       console.log("[GraphCanvas] Merge result:", result);
+      
+      // Remove loading node before creating the actual merged node
+      removeLoadingNode(graphSessionId, loadingNodeId);
 
       if (result.new_branch_id) {
         // Update store with new branch info
         const { setBackendSessionMeta, createMergedBranchWithNode } =
           useImageStore.getState();
         
-        // Use the graph session ID for graph operations
-        const graphSessionId = currentGraphSession.id;
+        // Get the actual merge start step from the response (may differ from our estimate)
+        const actualMergeStartStep = result.merge_steps?.start_step ?? mergeStartStep;
         
-        // Get the actual merge start step from the response
-        const mergeStartStep = result.merge_steps?.start_step ?? Math.max(sourceStep, targetStep);
+        // Recalculate position if step changed
+        let finalMergePosition = mergeNodePosition;
+        if (actualMergeStartStep !== mergeStartStep && !mergePlaceholderNodeId) {
+          finalMergePosition = calculateGridPosition(actualMergeStartStep, newBranchRowIndex);
+        }
         
         console.log(`[GraphCanvas] Creating merged branch: ${result.new_branch_id} in session ${graphSessionId}`);
         console.log(`[GraphCanvas] Source nodes: ${mergeSourceNode.id}@${sourceStep}, ${mergeTargetNode.id}@${targetStep}`);
-        console.log(`[GraphCanvas] Merged branch starts at step ${mergeStartStep}`);
+        console.log(`[GraphCanvas] Merged branch starts at step ${actualMergeStartStep}`);
         
         // Update active branch in backend session meta
         setBackendSessionMeta(sessionId, result.new_branch_id);
-
-        // Placeholder node가 있으면 그 위치 사용, 없으면 grid layout 계산
-        // Use the same row index calculation as getBranchRowIndex for consistency
-        let mergeNodePosition: { x: number; y: number };
-        if (mergePlaceholderNodeId) {
-          const placeholderNode = currentGraphSession.nodes.find(
-            (n) => n.id === mergePlaceholderNodeId
-          );
-          if (placeholderNode) {
-            mergeNodePosition = placeholderNode.position;
-            console.log(`[GraphCanvas] Using placeholder node position:`, mergeNodePosition);
-          } else {
-            // Calculate row index using unified function
-            // Note: branch doesn't exist yet, so we calculate based on what will exist
-            const nonMainBranches = currentGraphSession.branches.filter((b) => b.id !== "B0");
-            const newBranchRowIndex = nonMainBranches.length + 1; // +1 because main branch is row 0
-            mergeNodePosition = calculateGridPosition(mergeStartStep, newBranchRowIndex);
-          }
-        } else {
-          // Calculate row index using unified function
-          // Note: branch doesn't exist yet, so we calculate based on what will exist
-          const nonMainBranches = currentGraphSession.branches.filter((b) => b.id !== "B0");
-          const newBranchRowIndex = nonMainBranches.length + 1; // +1 because main branch is row 0
-          mergeNodePosition = calculateGridPosition(mergeStartStep, newBranchRowIndex);
-        }
 
         // Use a placeholder image or the target node's image for the initial merged node
         // The actual merged preview will be generated on the next step
         const initialImageUrl = mergeTargetNode.data?.imageUrl || mergeSourceNode.data?.imageUrl || "";
         
-        console.log(`[GraphCanvas] Adding merged branch node at step ${mergeStartStep}, image length: ${initialImageUrl?.length || 0}`);
+        console.log(`[GraphCanvas] Adding merged branch node at step ${actualMergeStartStep}, image length: ${initialImageUrl?.length || 0}`);
         
         // Create the merged branch and its initial node atomically
         // Connect to BOTH source nodes to visually show the merge
         // Placeholder node가 있으면 그 node를 변환
         const newNodeId = createMergedBranchWithNode(
           graphSessionId,
-          result.new_branch_id,
+          result.new_branch_id, // Backend branch ID (e.g., "B3")
+          sessionId, // Backend session ID
           mergeSourceNode.id, // First source node
           mergeTargetNode.id, // Second source node
           initialImageUrl,
-          mergeStartStep,
-          mergeNodePosition,
+          actualMergeStartStep,
+          finalMergePosition,
           mergePlaceholderNodeId || undefined // Placeholder node ID 전달
         );
 
-        console.log(`[GraphCanvas] Created merged branch node: ${newNodeId} at position:`, mergeNodePosition);
+        console.log(`[GraphCanvas] Created merged branch node: ${newNodeId} at position:`, finalMergePosition);
 
         // Remove edges that were connected to placeholder node (user-drawn edges)
         // These are the temporary edges created when user connected two image nodes to placeholder
@@ -1110,6 +1276,12 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       }
     } catch (error) {
       console.error("[GraphCanvas] Merge failed:", error);
+      // Remove loading node on error
+      if (loadingNodeId) {
+        const { removeLoadingNode: removeLoadingNodeCleanup } = useImageStore.getState();
+        removeLoadingNodeCleanup(graphSessionId, loadingNodeId);
+        console.log(`[GraphCanvas] Removed loading node on error: ${loadingNodeId}`);
+      }
       alert("브랜치 병합에 실패했습니다.");
     } finally {
       setIsMerging(false);
@@ -1138,19 +1310,96 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     setMergePlaceholderNodeId(null);
   }, []);
 
-  // Handle node drag to show visual feedback for potential merge
+  // Handle node drag to show visual feedback for potential merge and move prompt children
   const onNodeDrag = useCallback(
     (_event: React.MouseEvent, node: Node) => {
+      // Check for merge target (for image nodes)
       const mergeTarget = findMergeTarget(node);
       setPotentialMergeTargetId(mergeTarget?.id || null);
+      
+      // If dragging a prompt node, move all children together
+      if (node.type === "prompt" && draggingPromptRef.current?.nodeId === node.id) {
+        const { startPosition, childNodeIds, childStartPositions } = draggingPromptRef.current;
+        
+        // Calculate delta from start position
+        const deltaX = node.position.x - startPosition.x;
+        const deltaY = node.position.y - startPosition.y;
+        
+        // Update all child node positions
+        setNodes((nds) =>
+          nds.map((n) => {
+            if (childNodeIds.includes(n.id)) {
+              const childStart = childStartPositions.get(n.id);
+              if (childStart) {
+                return {
+                  ...n,
+                  position: {
+                    x: childStart.x + deltaX,
+                    y: childStart.y + deltaY,
+                  },
+                };
+              }
+            }
+            return n;
+          })
+        );
+      }
     },
-    [findMergeTarget]
+    [findMergeTarget, setNodes]
   );
 
-  // Clear potential merge target when drag starts
-  const onNodeDragStart = useCallback(() => {
-    setPotentialMergeTargetId(null);
-  }, []);
+  // Clear potential merge target when drag starts and track prompt node dragging
+  const onNodeDragStart = useCallback(
+    (_event: React.MouseEvent, node: Node) => {
+      setPotentialMergeTargetId(null);
+      
+      // Check if dragging a prompt node - if so, track it for moving children together
+      if (node.type === "prompt" && currentGraphSession) {
+        const childNodeIds = getAllDescendants(node.id);
+        const childStartPositions = new Map<string, { x: number; y: number }>();
+        
+        // Get the current offset for this prompt (if any)
+        const currentOffset = promptOffsetRef.current.get(node.id) || { deltaX: 0, deltaY: 0 };
+        
+        // Store starting positions of all child nodes
+        // Calculate positions with the current offset applied
+        for (const childId of childNodeIds) {
+          const childNode = currentGraphSession.nodes.find(n => n.id === childId);
+          if (!childNode) continue;
+          
+          // Calculate the base grid position for this child
+          let basePosition: { x: number; y: number };
+          if (childNode.type === "image" || childNode.type === "loading") {
+            const step = childNode.data?.step ?? 0;
+            const branchId = getNodeBranchId(childId) || "B0";
+            const rowIndex = getBranchRowIndexLocal(branchId);
+            basePosition = calculateGridPosition(step, rowIndex);
+          } else {
+            // For other node types, use their stored position
+            basePosition = childNode.position;
+          }
+          
+          // Apply the current offset
+          const positionWithOffset = {
+            x: basePosition.x + currentOffset.deltaX,
+            y: basePosition.y + currentOffset.deltaY,
+          };
+          
+          childStartPositions.set(childId, positionWithOffset);
+        }
+        
+        draggingPromptRef.current = {
+          nodeId: node.id,
+          startPosition: { ...node.position },
+          childNodeIds,
+          childStartPositions,
+        };
+        
+        console.log(`[GraphCanvas] Started dragging prompt node ${node.id} with ${childNodeIds.length} children`);
+      }
+    },
+    [getAllDescendants, currentGraphSession, getNodeBranchId, getBranchRowIndexLocal, calculateGridPosition]
+  );
 
   const onNodeClick = useCallback(
     (_event: React.MouseEvent, node: Node) => {
@@ -1275,26 +1524,40 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     [currentGraphSession]
   );
 
-  // Helper to get target branch ID from selected node
+  // Helper to get target unique branch ID from selected node
+  // Returns the uniqueBranchId for proper filtering across parallel sessions
   // IMPORTANT: This hook must be before any early returns to follow Rules of Hooks
   const getTargetBranchFromSelectedNode = useCallback(() => {
     const gs = useImageStore.getState().currentGraphSession;
-    const activeBranch = useImageStore.getState().backendActiveBranchId;
-    let targetBranchId = activeBranch || "B0";
     
     if (selectedNodeId && gs) {
       const selectedNode = gs.nodes.find((n) => n.id === selectedNodeId);
+      
+      // Priority: uniqueBranchId > edge branchId > construct from backend IDs
+      if (selectedNode?.data?.uniqueBranchId) {
+        return selectedNode.data.uniqueBranchId as string;
+      }
+      
+      const incoming = gs.edges.filter((e) => e.target === selectedNodeId);
+      const incomingBranch = incoming.find((e) => e.type === "branch");
+      if (incomingBranch?.data?.branchId) {
+        return incomingBranch.data.branchId as string;
+      }
+      
+      // Construct unique ID from backend IDs if available
+      if (selectedNode?.data?.backendBranchId && selectedNode?.data?.backendSessionId) {
+        return createUniqueBranchId(selectedNode.data.backendSessionId as string, selectedNode.data.backendBranchId as string);
+      }
+      
+      // Fallback to backend branch ID
       if (selectedNode?.data?.backendBranchId) {
-        targetBranchId = selectedNode.data.backendBranchId as string;
-      } else {
-        const incoming = gs.edges.filter((e) => e.target === selectedNodeId);
-        const incomingBranch = incoming.find((e) => e.type === "branch");
-        if (incomingBranch?.data?.branchId) {
-          targetBranchId = incomingBranch.data.branchId as string;
-        }
+        return selectedNode.data.backendBranchId as string;
       }
     }
-    return targetBranchId;
+    
+    // Default fallback - try to get from active branch (this is backend branch ID)
+    const activeBranch = useImageStore.getState().backendActiveBranchId;
+    return activeBranch || "B0";
   }, [selectedNodeId]);
 
   // Handle Next Step click - runs stepInterval steps and shows the final preview
@@ -1302,12 +1565,21 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const handleNextStep = useCallback(async () => {
     try {
       if (!currentGraphSession || !selectedNodeId) return;
-      const { backendSessionId, addImageNode, addImageNodeToBranch, addLoadingNode, addLoadingNodeToBranch, removeLoadingNode } =
+      const { backendSessionId, addImageNode, addLoadingNode, removeLoadingNode, getBackendSessionForNode } =
         useImageStore.getState();
-      const sessionId = backendSessionId || currentGraphSession.id;
-      const targetBranchId = getTargetBranchFromSelectedNode();
       
-      console.log(`[GraphCanvas] Next Step: selectedNodeId=${selectedNodeId}, targetBranchId=${targetBranchId}, stepInterval=${stepInterval}`);
+      // Get the correct backend session for this node (may be from a parallel session)
+      const nodeSession = getBackendSessionForNode(selectedNodeId);
+      const sessionId = nodeSession?.sessionId || backendSessionId || currentGraphSession.id;
+      
+      // Get unique branch ID for frontend filtering
+      const uniqueBranchId = getTargetBranchFromSelectedNode();
+      // Extract backend branch ID for API calls (use imported function)
+      const backendBranchId = extractBackendBranchId(uniqueBranchId);
+      // Check if this is a main branch (B0)
+      const isMainBranch = backendBranchId === "B0";
+      
+      console.log(`[GraphCanvas] Next Step: selectedNodeId=${selectedNodeId}, uniqueBranchId=${uniqueBranchId}, backendBranchId=${backendBranchId}, stepInterval=${stepInterval}`);
       setIsStepping(true);
       
       // Get the last step in the branch (not the selected node's step)
@@ -1315,12 +1587,13 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       let lastStepInBranch = 0;
       let lastNodeInBranch: GraphNode | null = null;
       
-      if (targetBranchId === "B0") {
-        // Main branch - find the last main branch node
+      if (isMainBranch) {
+        // Main branch - find the last main branch node for this session
+        // Filter by uniqueBranchId to get nodes only from this session's main branch
         const mainImageNodes = (currentGraphSession.nodes || []).filter((n) => {
           if (n.type !== "image") return false;
-          const inEdge = (currentGraphSession.edges || []).find((e) => e.target === n.id);
-          return !inEdge || inEdge.type !== "branch";
+          const nodeBranchId = getNodeBranchId(n.id);
+          return nodeBranchId === uniqueBranchId;
         });
         const lastMain = mainImageNodes
           .slice()
@@ -1335,7 +1608,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         const branchNodes = currentGraphSession.nodes.filter((n) => {
           if (n.type !== "image") return false;
           const nodeBranchId = getNodeBranchId(n.id);
-          return nodeBranchId === targetBranchId;
+          return nodeBranchId === uniqueBranchId;
         });
         const lastBranchNode = branchNodes
           .slice()
@@ -1350,18 +1623,26 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       const nextStep = lastStepInBranch + stepInterval;
       
       // Add loading node before starting (based on branch's last step)
+      // Use graph session ID for loading nodes
+      const graphSessionId = currentGraphSession.id;
       let loadingNodeId: string | null = null;
+      
+      // Find the prompt node for this session (needed for offset calculation)
+      const gs = useImageStore.getState().currentGraphSession;
+      const promptNode = gs?.nodes.find((n) => 
+        n.type === "prompt" && n.data?.backendSessionId === sessionId
+      ) || gs?.nodes.find((n) => n.type === "prompt");
+      const promptNodeId = promptNode?.id || null;
+      
       if (nextStep < 50) { // Only show loading if not at max step
-        const gs = useImageStore.getState().currentGraphSession;
-        if (targetBranchId === "B0") {
-          const promptNode = gs?.nodes.find((n) => n.type === "prompt");
-          const parentNodeId = lastNodeInBranch?.id || promptNode?.id || null;
-          if (parentNodeId) {
-            const pos = calculateGridPosition(nextStep, 0);
-            loadingNodeId = addLoadingNode(sessionId, parentNodeId, nextStep, pos, targetBranchId);
-          }
-        } else {
-          loadingNodeId = addLoadingNodeToBranch(sessionId, targetBranchId, nextStep);
+        const parentNodeId = lastNodeInBranch?.id || promptNodeId || null;
+        if (parentNodeId) {
+          // Get row index - for non-main branches, use the branch's row index
+          const rowIndex = isMainBranch 
+            ? (promptNode?.data?.rowIndex ?? 0)
+            : getBranchRowIndexLocal(uniqueBranchId);
+          const pos = calculatePositionWithOffset(nextStep, rowIndex, promptNodeId);
+          loadingNodeId = addLoadingNode(graphSessionId, parentNodeId, nextStep, pos, uniqueBranchId);
         }
       }
       
@@ -1370,8 +1651,8 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       
       for (let i = 0; i < stepInterval; i++) {
         const resp = await stepOnce({
-          session_id: sessionId,
-          branch_id: targetBranchId,
+          session_id: sessionId, // Use backend session ID for API calls
+          branch_id: backendBranchId, // Use backend branch ID for API calls
         });
         lastResp = resp;
         
@@ -1380,7 +1661,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           console.log(`[GraphCanvas] Reached end at step ${resp.i}/${resp.num_steps}`);
           // Remove loading node if we reached the end
           if (loadingNodeId) {
-            removeLoadingNode(sessionId, loadingNodeId);
+            removeLoadingNode(graphSessionId, loadingNodeId);
           }
           break;
         }
@@ -1388,49 +1669,74 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       
       // Only add preview for the last step
       if (lastResp?.preview_png_base64) {
-        const gs = useImageStore.getState().currentGraphSession;
-        if (targetBranchId === "B0") {
-          const promptNode = gs?.nodes.find((n) => n.type === "prompt");
-          const mainImageNodes = (gs?.nodes || []).filter((n) => {
-            if (n.type !== "image") return false;
-            const inEdge = (gs?.edges || []).find((e) => e.target === n.id);
-            return !inEdge || inEdge.type !== "branch";
-          });
-          const lastMain = mainImageNodes
-            .slice()
-            .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
-            .pop();
-          const parentNodeId = lastMain?.id || promptNode?.id || null;
-          if (parentNodeId) {
-            // Position will be calculated by grid layout
-            const pos = calculateGridPosition(lastResp.i, 0);
-            addImageNode(sessionId, parentNodeId, lastResp.preview_png_base64, lastResp.i, pos);
-          }
-        } else {
-          addImageNodeToBranch(sessionId, targetBranchId, lastResp.preview_png_base64, lastResp.i);
+        const gsAfterStep = useImageStore.getState().currentGraphSession;
+        // Use graph session ID for adding nodes (not backend session ID)
+        const currentGsId = gsAfterStep?.id || currentGraphSession.id;
+        
+        // Find the prompt node for this session (needed for offset calculation)
+        const promptNodeAfter = gsAfterStep?.nodes.find((n) => 
+          n.type === "prompt" && n.data?.backendSessionId === sessionId
+        ) || gsAfterStep?.nodes.find((n) => n.type === "prompt");
+        const promptNodeIdAfter = promptNodeAfter?.id || null;
+        
+        // Find the last node in this branch
+        const branchImageNodes = (gsAfterStep?.nodes || []).filter((n) => {
+          if (n.type !== "image") return false;
+          const nodeBranchId = getNodeBranchId(n.id);
+          return nodeBranchId === uniqueBranchId;
+        });
+        const lastBranchNode = branchImageNodes
+          .slice()
+          .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
+          .pop();
+        const parentNodeId = lastBranchNode?.id || promptNodeIdAfter || null;
+        
+        if (parentNodeId) {
+          // Get row index - for non-main branches, use the branch's row index
+          const rowIndex = isMainBranch 
+            ? (promptNodeAfter?.data?.rowIndex ?? 0)
+            : getBranchRowIndexLocal(uniqueBranchId);
+          // Position calculated with offset if prompt has been moved
+          const pos = calculatePositionWithOffset(lastResp.i, rowIndex, promptNodeIdAfter);
+          // Pass uniqueBranchId explicitly to ensure correct branch association
+          addImageNode(currentGsId, parentNodeId, lastResp.preview_png_base64, lastResp.i, pos, undefined, uniqueBranchId);
         }
       } else if (loadingNodeId) {
         // Remove loading node if no preview was generated
-        removeLoadingNode(sessionId, loadingNodeId);
+        const gs = useImageStore.getState().currentGraphSession;
+        const currentGsId = gs?.id || currentGraphSession.id;
+        removeLoadingNode(currentGsId, loadingNodeId);
       }
     } catch (e) {
       console.error("[GraphCanvas] Next Step failed:", e);
     } finally {
       setIsStepping(false);
     }
-  }, [currentGraphSession, selectedNodeId, getTargetBranchFromSelectedNode, stepInterval, calculateGridPosition]);
+  }, [currentGraphSession, selectedNodeId, getTargetBranchFromSelectedNode, stepInterval, calculatePositionWithOffset, getNodeBranchId, getBranchRowIndexLocal]);
 
   // Handle Run to End click - runs step by step showing each preview based on stepInterval
   // IMPORTANT: This hook must be before any early returns to follow Rules of Hooks
   const handleRunToEnd = useCallback(async () => {
     try {
       if (!currentGraphSession || !selectedNodeId) return;
-      const { backendSessionId, addLoadingNode, addLoadingNodeToBranch, removeLoadingNode } =
+      const { backendSessionId, addLoadingNode, removeLoadingNode, getBackendSessionForNode } =
         useImageStore.getState();
-      const sessionId = backendSessionId || currentGraphSession.id;
-      const targetBranchId = getTargetBranchFromSelectedNode();
       
-      console.log(`[GraphCanvas] Run to End: selectedNodeId=${selectedNodeId}, targetBranchId=${targetBranchId}, stepInterval=${stepInterval}`);
+      // Get the correct backend session for this node (may be from a parallel session)
+      const nodeSession = getBackendSessionForNode(selectedNodeId);
+      const backendSession = nodeSession?.sessionId || backendSessionId || currentGraphSession.id;
+      
+      // Get unique branch ID for frontend filtering
+      const uniqueBranchId = getTargetBranchFromSelectedNode();
+      // Extract backend branch ID for API calls
+      const backendBranchId = extractBackendBranchId(uniqueBranchId);
+      // Check if this is a main branch (B0)
+      const isMainBranch = backendBranchId === "B0";
+      
+      // Use graph session ID for node operations
+      const graphSessionId = currentGraphSession.id;
+      
+      console.log(`[GraphCanvas] Run to End: selectedNodeId=${selectedNodeId}, uniqueBranchId=${uniqueBranchId}, backendBranchId=${backendBranchId}, stepInterval=${stepInterval}, backendSession=${backendSession}, graphSession=${graphSessionId}`);
       setIsRunningToEnd(true);
       isPausedRef.current = false;
       setIsPaused(false);
@@ -1445,33 +1751,37 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         if (isPausedRef.current) {
           console.log(`[GraphCanvas] Run to End paused at step ${stepCount}`);
           if (currentLoadingNodeId) {
-            removeLoadingNode(sessionId, currentLoadingNodeId);
+            removeLoadingNode(graphSessionId, currentLoadingNodeId);
             currentLoadingNodeId = null;
           }
           break;
         }
         
         // Get fresh state for each step
-        const { addImageNodeToBranch, addImageNode, currentGraphSession: gs } =
+        const { addImageNode: addImageNodeFresh, currentGraphSession: gs } =
           useImageStore.getState();
         
-        // Helper to get node branch ID (needed for loading node logic)
+        // Helper to get node unique branch ID (needed for loading node logic)
         const getNodeBranchIdLocal = (nodeId: string): string | null => {
           if (!gs) return null;
           const node = gs.nodes.find((n) => n.id === nodeId);
-          if (node?.data?.backendBranchId) {
-            return node.data.backendBranchId as string;
+          if (node?.data?.uniqueBranchId) {
+            return node.data.uniqueBranchId as string;
           }
           const incoming = gs.edges.find((e) => e.target === nodeId);
           if (incoming?.data?.branchId) {
             return incoming.data.branchId as string;
           }
-          return "B0";
+          // Legacy fallback
+          if (node?.data?.backendBranchId && node?.data?.backendSessionId) {
+            return createUniqueBranchId(node.data.backendSessionId as string, node.data.backendBranchId as string);
+          }
+          return node?.data?.backendBranchId as string || null;
         };
         
         const resp = await stepOnce({
-          session_id: sessionId,
-          branch_id: targetBranchId,
+          session_id: backendSession, // Use backend session ID for API calls
+          branch_id: backendBranchId, // Use backend branch ID for API calls
         });
         
         console.log(`[GraphCanvas] Run to End step ${resp.i}/${resp.num_steps}`);
@@ -1485,7 +1795,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         
         // Remove previous loading node if preview is shown
         if (shouldShowPreview && currentLoadingNodeId) {
-          removeLoadingNode(sessionId, currentLoadingNodeId);
+          removeLoadingNode(graphSessionId, currentLoadingNodeId);
           currentLoadingNodeId = null;
         }
         
@@ -1494,16 +1804,11 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         if (!isLastStep && resp.i < 50) {
           const nextStep = resp.i + stepInterval;
           if (nextStep <= 50 && !currentLoadingNodeId) {
-            // Find the last node in the branch after this step
+            // Find the last node in the branch after this step (filter by unique branch ID)
             const branchNodes = gs?.nodes.filter((n) => {
               if (n.type !== "image") return false;
-              if (targetBranchId === "B0") {
-                const inEdge = (gs?.edges || []).find((e) => e.target === n.id);
-                return !inEdge || inEdge.type !== "branch";
-              } else {
-                const nodeBranchId = getNodeBranchIdLocal(n.id);
-                return nodeBranchId === targetBranchId;
-              }
+              const nodeBranchId = getNodeBranchIdLocal(n.id);
+              return nodeBranchId === uniqueBranchId;
             }) || [];
             
             const lastBranchNode = branchNodes
@@ -1511,43 +1816,58 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
               .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
               .pop();
             
-            if (targetBranchId === "B0") {
-              const promptNode = gs?.nodes.find((n) => n.type === "prompt");
-              const parentNodeId = lastBranchNode?.id || promptNode?.id || null;
-              if (parentNodeId) {
-                const pos = calculateGridPosition(nextStep, 0);
-                currentLoadingNodeId = addLoadingNode(sessionId, parentNodeId, nextStep, pos, targetBranchId);
-              }
-            } else {
-              currentLoadingNodeId = addLoadingNodeToBranch(sessionId, targetBranchId, nextStep);
+            // Find the prompt node for this session (needed for offset calculation)
+            const promptNode = gs?.nodes.find((n) => 
+              n.type === "prompt" && n.data?.backendSessionId === backendSession
+            ) || gs?.nodes.find((n) => n.type === "prompt");
+            const promptNodeIdLocal = promptNode?.id || null;
+            const parentNodeId = lastBranchNode?.id || promptNodeIdLocal || null;
+            if (parentNodeId) {
+              // Get row index - for non-main branches, use the branch's row index
+              const rowIndex = isMainBranch 
+                ? (promptNode?.data?.rowIndex ?? 0)
+                : getBranchRowIndexLocal(uniqueBranchId);
+              const pos = calculatePositionWithOffset(nextStep, rowIndex, promptNodeIdLocal);
+              currentLoadingNodeId = addLoadingNode(graphSessionId, parentNodeId, nextStep, pos, uniqueBranchId);
             }
           }
         } else if (isLastStep && currentLoadingNodeId) {
-          removeLoadingNode(sessionId, currentLoadingNodeId);
+          removeLoadingNode(graphSessionId, currentLoadingNodeId);
           currentLoadingNodeId = null;
         }
         
         if (resp.preview_png_base64 && shouldShowPreview) {
           console.log(`[GraphCanvas] Adding preview for step ${resp.i} (interval: ${stepInterval})`);
-          if (targetBranchId === "B0") {
-            const promptNode = gs?.nodes.find((n) => n.type === "prompt");
-            const mainImageNodes = (gs?.nodes || []).filter((n) => {
-              if (n.type !== "image") return false;
-              const inEdge = (gs?.edges || []).find((e) => e.target === n.id);
-              return !inEdge || inEdge.type !== "branch";
-            });
-            const lastMain = mainImageNodes
-              .slice()
-              .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
-              .pop();
-            const parentNodeId = lastMain?.id || promptNode?.id || null;
-            if (parentNodeId) {
-              // Position will be calculated by grid layout
-              const pos = calculateGridPosition(resp.i, 0);
-              addImageNode(sessionId, parentNodeId, resp.preview_png_base64, resp.i, pos);
-            }
-          } else {
-            addImageNodeToBranch(sessionId, targetBranchId, resp.preview_png_base64, resp.i);
+          // Use graph session ID for adding nodes
+          const currentGsId = gs?.id || graphSessionId;
+          
+          // Find the prompt node for this session (needed for offset calculation)
+          const promptNode = gs?.nodes.find((n) => 
+            n.type === "prompt" && n.data?.backendSessionId === backendSession
+          ) || gs?.nodes.find((n) => n.type === "prompt");
+          const promptNodeIdLocal = promptNode?.id || null;
+          
+          // Find the last node in this branch (filter by unique branch ID)
+          const branchImageNodes = (gs?.nodes || []).filter((n) => {
+            if (n.type !== "image") return false;
+            const nodeBranchId = getNodeBranchIdLocal(n.id);
+            return nodeBranchId === uniqueBranchId;
+          });
+          const lastBranchNode = branchImageNodes
+            .slice()
+            .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
+            .pop();
+          const parentNodeId = lastBranchNode?.id || promptNodeIdLocal || null;
+          
+          if (parentNodeId) {
+            // Get row index - for non-main branches, use the branch's row index
+            const rowIndex = isMainBranch 
+              ? (promptNode?.data?.rowIndex ?? 0)
+              : getBranchRowIndexLocal(uniqueBranchId);
+            // Position calculated with offset if prompt has been moved
+            const pos = calculatePositionWithOffset(resp.i, rowIndex, promptNodeIdLocal);
+            // Pass uniqueBranchId explicitly to ensure correct branch association
+            addImageNodeFresh(currentGsId, parentNodeId, resp.preview_png_base64, resp.i, pos, undefined, uniqueBranchId);
           }
         }
         
@@ -1567,7 +1887,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       isPausedRef.current = false;
       setIsPaused(false);
     }
-  }, [currentGraphSession, selectedNodeId, getTargetBranchFromSelectedNode, stepInterval, calculateGridPosition]);
+  }, [currentGraphSession, selectedNodeId, getTargetBranchFromSelectedNode, stepInterval, calculatePositionWithOffset, getBranchRowIndexLocal]);
 
   // Handle Pause button click
   const handlePause = useCallback(() => {
@@ -1594,18 +1914,24 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       return;
     }
     
-    const { backendSessionId, removeNodeAndDescendants } = useImageStore.getState();
-    const sessionId = backendSessionId || currentGraphSession.id;
-    const targetBranchId = getTargetBranchFromSelectedNode();
+    const { backendSessionId, removeNodeAndDescendants, getBackendSessionForNode } = useImageStore.getState();
     
-    console.log(`[GraphCanvas] Backtracking: node=${selectedNodeId}, step=${step}, branch=${targetBranchId}`);
+    // Get the correct backend session for this node (may be from a parallel session)
+    const nodeSession = getBackendSessionForNode(selectedNodeId);
+    const sessionId = nodeSession?.sessionId || backendSessionId || currentGraphSession.id;
+    
+    // Get unique branch ID and extract backend branch ID
+    const uniqueBranchId = getTargetBranchFromSelectedNode();
+    const backendBranchId = extractBackendBranchId(uniqueBranchId);
+    
+    console.log(`[GraphCanvas] Backtracking: node=${selectedNodeId}, step=${step}, uniqueBranch=${uniqueBranchId}, backendBranch=${backendBranchId}`);
     setIsBacktracking(true);
     
     try {
-      // Call backend to backtrack
+      // Call backend to backtrack (use backend branch ID for API)
       const result = await backtrackTo({
         session_id: sessionId,
-        branch_id: targetBranchId,
+        branch_id: backendBranchId, // Use backend branch ID for API calls
         step_index: step - 1, // Go back one step before the selected node
       });
       
@@ -1721,7 +2047,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             }}
             title="새로운 node를 canvas에 추가합니다"
           >
-            + New Node
+            + New Prompt
           </button>
 
           {/* Next Step Button */}
