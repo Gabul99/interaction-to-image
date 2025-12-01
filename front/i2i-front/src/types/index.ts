@@ -68,7 +68,7 @@ export interface CompositionState {
 // 그래프 관련 타입
 export interface GraphNode {
   id: string;
-  type: 'prompt' | 'image';
+  type: 'prompt' | 'image' | 'placeholder' | 'loading';
   data: {
     prompt?: string;
     imageUrl?: string;
@@ -81,6 +81,8 @@ export interface GraphNode {
       bboxes: BoundingBox[];
       sketchLayers: SketchLayer[];
     };
+    // Placeholder node 관련
+    onClick?: () => void; // Placeholder node 클릭 핸들러
   };
   position: { x: number; y: number };
 }

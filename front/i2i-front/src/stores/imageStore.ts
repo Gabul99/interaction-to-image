@@ -14,6 +14,41 @@ import {
 import { connectImageStream, disconnectImageStream } from "../api/websocket";
 import { USE_MOCK_MODE } from "../config/api";
 
+// Grid layout constants (must match GraphCanvas.tsx)
+const GRID_CELL_WIDTH = 80;
+const GRID_CELL_HEIGHT = 280;
+const GRID_START_X = 100;
+const GRID_START_Y = 50;
+
+/**
+ * Calculate branch row index (main branch = 0, others = 1, 2, 3...)
+ * Branches are sorted by their ID number (B1, B2, B3...) to ensure consistent ordering
+ * @param branchId - Branch ID (e.g., "B0", "B1", "B2")
+ * @param branches - Array of all branches in the graph session
+ * @returns Row index (0 for main branch, 1+ for others)
+ */
+export const getBranchRowIndex = (
+  branchId: string,
+  branches: Branch[]
+): number => {
+  if (branchId === "B0") return 0;
+
+  // Extract branch number from ID (e.g., "B1" -> 1, "B2" -> 2)
+  const getBranchNumber = (id: string): number => {
+    const match = id.match(/^B(\d+)$/);
+    return match ? parseInt(match[1], 10) : 0;
+  };
+
+  // Get all non-main branches and sort by their ID number
+  const nonMainBranches = branches
+    .filter((b) => b.id !== "B0")
+    .sort((a, b) => getBranchNumber(a.id) - getBranchNumber(b.id));
+
+  // Find the index of the target branch in the sorted array
+  const index = nonMainBranches.findIndex((b) => b.id === branchId);
+  return index >= 0 ? index + 1 : 1; // +1 because main branch is row 0
+};
+
 export interface ImageStep {
   id: string; // 서버에서 보내준 UUID
   url: string;
@@ -148,7 +183,7 @@ export interface ImageStreamState {
   backendSessionId: string | null;
   backendActiveBranchId: string | null;
   setBackendSessionMeta: (sessionId: string, activeBranchId: string) => void;
-  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string) => void;
+  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string, feedback?: FeedbackRecord[]) => void;
   createMergedBranchWithNode: (
     sessionId: string,
     branchId: string,
@@ -156,10 +191,12 @@ export interface ImageStreamState {
     sourceNodeId2: string, // Second source node (e.g., from branch 2)
     imageUrl: string,
     step: number,
-    position: { x: number; y: number }
+    position: { x: number; y: number },
+    placeholderNodeId?: string // Optional: placeholder node ID to convert
   ) => string; // Returns the new node ID
 
   // 그래프 세션 관련 액션
+  initializeEmptyGraphSession: () => void; // 빈 GraphSession 초기화
   createGraphSession: (
     prompt: string,
     sessionId: string,
@@ -167,6 +204,11 @@ export interface ImageStreamState {
     bboxes?: BoundingBox[],
     sketchLayers?: SketchLayer[]
   ) => string;
+  addPlaceholderNode: (
+    sessionId: string,
+    position: { x: number; y: number },
+    onClick?: () => void
+  ) => string; // nodeId 반환
   addImageNode: (
     sessionId: string,
     parentNodeId: string,
@@ -183,11 +225,31 @@ export interface ImageStreamState {
     position?: { x: number; y: number },
     nodeId?: string
   ) => string; // nodeId 반환
+  addLoadingNode: (
+    sessionId: string,
+    parentNodeId: string,
+    step: number,
+    position: { x: number; y: number },
+    branchId?: string
+  ) => string; // nodeId 반환
+  addLoadingNodeToBranch: (
+    sessionId: string,
+    branchId: string,
+    step: number,
+    position?: { x: number; y: number }
+  ) => string; // nodeId 반환
+  removeLoadingNode: (sessionId: string, nodeId: string) => void;
   updateNodePosition: (
     sessionId: string,
     nodeId: string,
     position: { x: number; y: number }
   ) => void;
+  addEdge: (
+    sessionId: string,
+    source: string,
+    target: string,
+    edgeData?: GraphEdge["data"]
+  ) => string; // edgeId 반환
   selectNode: (nodeId: string | null) => void;
   simulateGraphImageStream: (
     sessionId: string,
@@ -228,15 +290,35 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   setBackendSessionMeta: (sessionId: string, activeBranchId: string) => {
     set({ backendSessionId: sessionId, backendActiveBranchId: activeBranchId });
   },
-  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string) => {
+  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string, feedback?: FeedbackRecord[]) => {
     const state = get();
     if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) return;
     const exists = state.currentGraphSession.branches.find((b) => b.id === branchId);
-    if (exists) return;
+    if (exists) {
+      // Update existing branch with feedback if provided
+      if (feedback && feedback.length > 0) {
+        set({
+          currentGraphSession: {
+            ...state.currentGraphSession,
+            branches: state.currentGraphSession.branches.map((b) =>
+              b.id === branchId ? { ...b, feedback: [...(b.feedback || []), ...feedback] } : b
+            ),
+          },
+        });
+      }
+      return;
+    }
+    
+    // Debug: Log branch creation
+    const nonMainBranchesBefore = state.currentGraphSession.branches.filter((b) => b.id !== "B0");
+    console.log(`[ImageStore] Creating branch ${branchId}`);
+    console.log(`[ImageStore] Branches BEFORE:`, state.currentGraphSession.branches.map(b => b.id).join(", "));
+    console.log(`[ImageStore] Non-main branches BEFORE:`, nonMainBranchesBefore.map(b => b.id).join(", "));
+    
     const newBranch: Branch = {
       id: branchId,
       sourceNodeId,
-      feedback: [],
+      feedback: feedback || [],
       nodes: [],
     };
     set({
@@ -246,6 +328,12 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       },
       backendActiveBranchId: branchId,
     });
+    
+    // Debug: Log after creation
+    const updatedState = get();
+    const nonMainBranchesAfter = updatedState.currentGraphSession!.branches.filter((b) => b.id !== "B0");
+    console.log(`[ImageStore] Branches AFTER:`, updatedState.currentGraphSession!.branches.map(b => b.id).join(", "));
+    console.log(`[ImageStore] Non-main branches AFTER:`, nonMainBranchesAfter.map(b => b.id).join(", "));
   },
 
   // Create a merged branch and its initial node atomically
@@ -257,7 +345,8 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     sourceNodeId2: string, // Second source node (e.g., from branch 2)
     imageUrl: string,
     step: number,
-    position: { x: number; y: number }
+    position: { x: number; y: number },
+    placeholderNodeId?: string // Optional: placeholder node ID to convert
   ): string => {
     const state = get();
     if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) {
@@ -272,8 +361,27 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return "";
     }
 
-    // Generate node ID
-    const nodeId = `node_merged_${branchId}_${step}_${Date.now()}`;
+    // Placeholder node가 있으면 그 node를 변환, 없으면 새 node 생성
+    let nodeId: string;
+    let finalPosition = position;
+    
+    if (placeholderNodeId) {
+      const placeholderNode = state.currentGraphSession.nodes.find(
+        (n) => n.id === placeholderNodeId && n.type === "placeholder"
+      );
+      if (placeholderNode) {
+        nodeId = placeholderNodeId; // 기존 placeholder node ID 사용
+        finalPosition = placeholderNode.position; // 기존 위치 사용
+        console.log(`[ImageStore] Converting placeholder node ${nodeId} to merge result node`);
+      } else {
+        // Placeholder node를 찾을 수 없으면 새로 생성
+        nodeId = `node_merged_${branchId}_${step}_${Date.now()}`;
+        console.warn(`[ImageStore] Placeholder node ${placeholderNodeId} not found, creating new node`);
+      }
+    } else {
+      // Generate node ID
+      nodeId = `node_merged_${branchId}_${step}_${Date.now()}`;
+    }
     
     // Find PARENT nodes of the source nodes (previous step nodes)
     // This creates a proper merge visualization from the previous steps
@@ -339,10 +447,17 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     console.log(`[ImageStore] Merge edges: ${parentNodeId1} -> ${nodeId}, ${parentNodeId2} -> ${nodeId}`);
 
     // Update state atomically
+    // Placeholder node가 있으면 변환, 없으면 추가
+    const updatedNodes = placeholderNodeId
+      ? state.currentGraphSession.nodes.map((n) =>
+          n.id === placeholderNodeId ? newNode : n
+        )
+      : [...state.currentGraphSession.nodes, newNode];
+    
     set({
       currentGraphSession: {
         ...state.currentGraphSession,
-        nodes: [...state.currentGraphSession.nodes, newNode],
+        nodes: updatedNodes,
         edges: [...state.currentGraphSession.edges, ...edges],
         branches: [...state.currentGraphSession.branches, newBranch],
       },
@@ -1309,6 +1424,18 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     intervalId = setInterval(addNextStep, 800); // 800ms마다 업데이트
   },
 
+  // 빈 그래프 세션 초기화
+  initializeEmptyGraphSession: () => {
+    const emptySession: GraphSession = {
+      id: `empty_${Date.now()}`,
+      nodes: [],
+      edges: [],
+      branches: [],
+    };
+    set({ currentGraphSession: emptySession });
+    console.log("[ImageStore] 빈 그래프 세션 초기화");
+  },
+
   // 그래프 세션 생성
   createGraphSession: (
     prompt: string,
@@ -1317,7 +1444,23 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     bboxes?: BoundingBox[],
     sketchLayers?: SketchLayer[]
   ) => {
+    const state = get();
+    const currentSession = state.currentGraphSession;
+    
+    // 기존 세션에서 placeholder node 찾기
+    let placeholderNode: GraphNode | undefined;
+    let placeholderPosition = { x: 400, y: 50 }; // 기본 위치
+    
+    if (currentSession) {
+      placeholderNode = currentSession.nodes.find((n) => n.type === "placeholder");
+      if (placeholderNode) {
+        placeholderPosition = placeholderNode.position;
+        console.log("[ImageStore] Placeholder node 발견, 위치:", placeholderPosition);
+      }
+    }
+
     // 프롬프트 노드 생성 (루트 노드)
+    // placeholder node가 있으면 그 위치에, 없으면 기본 위치에
     const promptNodeId = rootNodeId || `node_prompt_${Date.now()}`;
     const rootNode: GraphNode = {
       id: promptNodeId,
@@ -1334,7 +1477,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
               }
             : undefined,
       },
-      position: { x: 400, y: 50 },
+      position: placeholderPosition,
     };
 
     // 메인 브랜치 생성
@@ -1345,17 +1488,83 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       nodes: [],
     };
 
+    // 기존 세션이 있고 placeholder node가 있으면, placeholder node를 제거하고 prompt node로 교체
+    let nodes: GraphNode[] = [rootNode];
+    let edges: GraphEdge[] = [];
+    let branches: Branch[] = [mainBranch];
+    
+    if (currentSession && placeholderNode) {
+      // placeholder node를 제외한 나머지 노드들 유지
+      nodes = [
+        rootNode,
+        ...currentSession.nodes.filter((n) => n.id !== placeholderNode!.id),
+      ];
+      
+      // placeholder node로 연결된 edge들을 prompt node로 재연결
+      edges = currentSession.edges.map((e) => {
+        if (e.target === placeholderNode!.id) {
+          return { ...e, target: promptNodeId };
+        }
+        if (e.source === placeholderNode!.id) {
+          return { ...e, source: promptNodeId };
+        }
+        return e;
+      });
+      
+      // 기존 브랜치 유지 (새로운 메인 브랜치 추가)
+      branches = [mainBranch, ...currentSession.branches];
+      
+      console.log("[ImageStore] Placeholder node를 prompt node로 변환:", {
+        placeholderId: placeholderNode.id,
+        promptNodeId,
+        position: placeholderPosition,
+      });
+    }
+
     const graphSession: GraphSession = {
       id: sessionId,
-      nodes: [rootNode],
-      edges: [],
-      branches: [mainBranch],
+      nodes,
+      edges,
+      branches,
     };
 
     set({ currentGraphSession: graphSession });
     console.log("[ImageStore] 그래프 세션 생성:", sessionId);
 
     return sessionId;
+  },
+
+  // Placeholder 노드 추가
+  addPlaceholderNode: (
+    sessionId: string,
+    position: { x: number; y: number },
+    onClick?: () => void
+  ): string => {
+    const state = get();
+    const session = state.currentGraphSession;
+    if (!session || session.id !== sessionId) {
+      console.error("[ImageStore] 세션을 찾을 수 없습니다:", sessionId);
+      throw new Error("Session not found");
+    }
+
+    const nodeId = `node_placeholder_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const placeholderNode: GraphNode = {
+      id: nodeId,
+      type: "placeholder",
+      data: {
+        onClick,
+      },
+      position,
+    };
+
+    const updatedSession: GraphSession = {
+      ...session,
+      nodes: [...session.nodes, placeholderNode],
+    };
+
+    set({ currentGraphSession: updatedSession });
+    console.log("[ImageStore] Placeholder 노드 추가:", nodeId);
+    return nodeId;
   },
 
   // 이미지 노드 추가 (nodeId는 선택적, 제공되지 않으면 자동 생성)
@@ -1393,8 +1602,47 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         currentGraphSession: {
           ...state.currentGraphSession,
           nodes: state.currentGraphSession.nodes.map((n) =>
-            n.id === finalNodeId ? { ...n, data: { ...n.data, imageUrl } } : n
+            n.id === finalNodeId ? { ...n, data: { ...n.data, imageUrl }, type: "image" } : n
           ),
+        },
+      });
+      return finalNodeId;
+    }
+
+    // 같은 step의 loading node가 있는지 확인하고 교체
+    const loadingNode = state.currentGraphSession.nodes.find(
+      (n) => n.type === "loading" && 
+             n.data.step === step &&
+             (!n.data.backendBranchId || n.data.backendBranchId === "B0")
+    );
+    if (loadingNode) {
+      console.log(
+        `[ImageStore] Loading 노드를 이미지 노드로 교체: ${loadingNode.id} -> ${finalNodeId}`
+      );
+      // Loading node를 image node로 교체
+      const updatedNodes = state.currentGraphSession.nodes.map((n) =>
+        n.id === loadingNode.id
+          ? {
+              ...n,
+              id: finalNodeId,
+              type: "image",
+              data: { ...n.data, imageUrl },
+            }
+          : n
+      );
+      
+      // Edge의 target도 업데이트
+      const updatedEdges = state.currentGraphSession.edges.map((e) =>
+        e.target === loadingNode.id
+          ? { ...e, target: finalNodeId }
+          : e
+      );
+
+      set({
+        currentGraphSession: {
+          ...state.currentGraphSession,
+          nodes: updatedNodes,
+          edges: updatedEdges,
         },
       });
       return finalNodeId;
@@ -1444,6 +1692,179 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     return finalNodeId;
   },
 
+  // Loading node 추가 (메인 브랜치)
+  addLoadingNode: (
+    sessionId: string,
+    parentNodeId: string,
+    step: number,
+    position: { x: number; y: number },
+    branchId?: string
+  ): string => {
+    const state = get();
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
+      console.warn("[ImageStore] 그래프 세션을 찾을 수 없습니다:", sessionId);
+      return "";
+    }
+
+    const nodeId = `node_loading_${sessionId}_${step}_${Date.now()}`;
+    const loadingNode: GraphNode = {
+      id: nodeId,
+      type: "loading",
+      data: { step, sessionId, backendBranchId: branchId },
+      position,
+    };
+
+    const edgeId = `edge_${parentNodeId}_${nodeId}`;
+    const newEdge: GraphEdge = {
+      id: edgeId,
+      source: parentNodeId,
+      target: nodeId,
+      type: "default",
+    };
+
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        nodes: [...state.currentGraphSession.nodes, loadingNode],
+        edges: [...state.currentGraphSession.edges, newEdge],
+      },
+    });
+
+    console.log(
+      `[ImageStore] Loading 노드 추가: ${nodeId}, 부모: ${parentNodeId}, 스텝: ${step}`
+    );
+    return nodeId;
+  },
+
+  // Loading node 추가 (브랜치)
+  addLoadingNodeToBranch: (
+    sessionId: string,
+    branchId: string,
+    step: number,
+    position?: { x: number; y: number }
+  ): string => {
+    const state = get();
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
+      console.warn("[ImageStore] 그래프 세션을 찾을 수 없습니다:", sessionId);
+      return "";
+    }
+
+    const branch = state.currentGraphSession.branches.find(
+      (b) => b.id === branchId
+    );
+    if (!branch) {
+      console.warn("[ImageStore] 브랜치를 찾을 수 없습니다:", branchId);
+      return "";
+    }
+
+    const nodeId = `node_loading_${sessionId}_${step}_${Date.now()}`;
+
+    // Calculate position using unified getBranchRowIndex
+    let finalPosition: { x: number; y: number };
+    if (position) {
+      // If position is provided, use it but recalculate y based on rowIndex for consistency
+      const rowIndex = getBranchRowIndex(branchId, state.currentGraphSession.branches);
+      finalPosition = {
+        x: position.x,
+        y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
+      };
+    } else {
+      const rowIndex = getBranchRowIndex(branchId, state.currentGraphSession.branches);
+      finalPosition = {
+        x: GRID_START_X + step * GRID_CELL_WIDTH,
+        y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
+      };
+    }
+
+    // 부모 노드 ID 찾기
+    const branchNodes = state.currentGraphSession.nodes.filter((n) =>
+      branch.nodes.includes(n.id)
+    );
+    const lastNode = branchNodes[branchNodes.length - 1];
+    
+    let parentNodeId: string;
+    if (lastNode) {
+      parentNodeId = lastNode.id;
+    } else {
+      const sourceEdge = state.currentGraphSession.edges.find(
+        (e) => e.target === branch.sourceNodeId
+      );
+      if (sourceEdge) {
+        parentNodeId = sourceEdge.source;
+      } else {
+        parentNodeId = branch.sourceNodeId;
+      }
+    }
+
+    const loadingNode: GraphNode = {
+      id: nodeId,
+      type: "loading",
+      data: { step, sessionId, backendBranchId: branchId },
+      position: finalPosition,
+    };
+
+    const edgeId = `edge_${parentNodeId}_${nodeId}`;
+    const branchFeedback = branch.feedback || [];
+    const newEdge: GraphEdge = {
+      id: edgeId,
+      source: parentNodeId,
+      target: nodeId,
+      type: "branch",
+      data: { 
+        branchId,
+        feedback: branchNodes.length === 0 ? branchFeedback : undefined,
+      },
+    };
+
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        nodes: [...state.currentGraphSession.nodes, loadingNode],
+        edges: [...state.currentGraphSession.edges, newEdge],
+      },
+    });
+
+    console.log(
+      `[ImageStore] Loading 노드 추가 (브랜치): ${nodeId}, branchId: ${branchId}, 스텝: ${step}`
+    );
+    return nodeId;
+  },
+
+  // Loading node 제거
+  removeLoadingNode: (sessionId: string, nodeId: string) => {
+    const state = get();
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
+      console.warn("[ImageStore] 그래프 세션을 찾을 수 없습니다:", sessionId);
+      return;
+    }
+
+    // 노드와 연결된 edge도 제거
+    const edgesToRemove = state.currentGraphSession.edges.filter(
+      (e) => e.source === nodeId || e.target === nodeId
+    );
+
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        nodes: state.currentGraphSession.nodes.filter((n) => n.id !== nodeId),
+        edges: state.currentGraphSession.edges.filter(
+          (e) => !edgesToRemove.includes(e)
+        ),
+      },
+    });
+
+    console.log(`[ImageStore] Loading 노드 제거: ${nodeId}`);
+  },
+
   // 브랜치에 이미지 노드 추가 (nodeId와 position은 선택적)
   addImageNodeToBranch: (
     sessionId: string,
@@ -1474,27 +1895,18 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     const finalNodeId =
       nodeId || `node_image_${sessionId}_${step}_${Date.now()}`;
 
-    // Grid layout constants (must match GraphCanvas.tsx)
-    const GRID_CELL_WIDTH = 80;
-    const GRID_CELL_HEIGHT = 280;
-    const GRID_START_X = 100;
-    const GRID_START_Y = 50;
-
-    // Calculate branch row index (main branch = 0, others = 1, 2, 3...)
-    const getBranchRowIndex = (branchId: string): number => {
-      if (branchId === "B0") return 0;
-      const nonMainBranches = state.currentGraphSession!.branches.filter((b) => b.id !== "B0");
-      const index = nonMainBranches.findIndex((b) => b.id === branchId);
-      return index >= 0 ? index + 1 : 1;
-    };
-
-    // position이 제공되지 않으면 그리드 기반으로 자동 계산
+    // Calculate position using unified getBranchRowIndex
+    // Always recalculate y based on rowIndex for consistency, even if position is provided
     let finalPosition: { x: number; y: number };
+    const rowIndex = getBranchRowIndex(branchId, state.currentGraphSession.branches);
     if (position) {
-      finalPosition = position;
+      // If position is provided, use x from position but recalculate y based on rowIndex
+      finalPosition = {
+        x: position.x,
+        y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
+      };
     } else {
       // Calculate position based on step and branch row
-      const rowIndex = getBranchRowIndex(branchId);
       finalPosition = {
         x: GRID_START_X + step * GRID_CELL_WIDTH,
         y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
@@ -1560,12 +1972,18 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     };
 
     const edgeId = `edge_${parentNodeId}_${finalNodeId}`;
+    // Get feedback from branch for the first node in branch
+    const branchFeedback = branch.feedback || [];
     const newEdge: GraphEdge = {
       id: edgeId,
       source: parentNodeId,
       target: finalNodeId,
       type: "branch",
-      data: { branchId },
+      data: { 
+        branchId,
+        // Include feedback for the first edge of the branch (from parent to first node)
+        feedback: branchNodes.length === 0 ? branchFeedback : undefined,
+      },
     };
 
     set({
@@ -1583,6 +2001,39 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       `[ImageStore] 브랜치 이미지 노드 추가: ${finalNodeId}, 브랜치: ${branchId}, 부모: ${parentNodeId}, 스텝: ${step}`
     );
     return finalNodeId;
+  },
+
+  // Edge 추가
+  addEdge: (
+    sessionId: string,
+    source: string,
+    target: string,
+    edgeData?: GraphEdge["data"]
+  ): string => {
+    const state = get();
+    const session = state.currentGraphSession;
+    if (!session || session.id !== sessionId) {
+      console.error("[ImageStore] 세션을 찾을 수 없습니다:", sessionId);
+      throw new Error("Session not found");
+    }
+
+    const edgeId = `edge_${source}_${target}_${Date.now()}`;
+    const newEdge: GraphEdge = {
+      id: edgeId,
+      source,
+      target,
+      type: "default",
+      data: edgeData,
+    };
+
+    const updatedSession: GraphSession = {
+      ...session,
+      edges: [...session.edges, newEdge],
+    };
+
+    set({ currentGraphSession: updatedSession });
+    console.log("[ImageStore] Edge 추가:", edgeId);
+    return edgeId;
   },
 
   // 노드 위치 업데이트

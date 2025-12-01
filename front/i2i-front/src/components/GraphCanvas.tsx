@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState, useRef } from "react";
+import React, { useCallback, useMemo, useState, useRef, useEffect } from "react";
 import ReactFlow, {
   type Node,
   type Edge,
@@ -13,11 +13,14 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import styled, { createGlobalStyle } from "styled-components";
-import { useImageStore } from "../stores/imageStore";
+import { useImageStore, getBranchRowIndex } from "../stores/imageStore";
 import { USE_MOCK_MODE } from "../config/api";
 import { connectImageStream } from "../api/websocket";
+import { type GraphNode } from "../types";
 import PromptNode from "./PromptNode";
 import ImageNode from "./ImageNode";
+import PlaceholderNode from "./PlaceholderNode";
+import LoadingNode from "./LoadingNode";
 import BranchingModal from "./BranchingModal";
 import FeedbackEdge from "./FeedbackEdge";
 import { stepOnce, mergeBranches } from "../lib/api";
@@ -25,6 +28,8 @@ import { stepOnce, mergeBranches } from "../lib/api";
 const nodeTypes: NodeTypes = {
   prompt: PromptNode,
   image: ImageNode,
+  placeholder: PlaceholderNode,
+  loading: LoadingNode,
 };
 
 const edgeTypes: EdgeTypes = {
@@ -289,6 +294,10 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     selectedNodeId,
     selectNode,
     backendSessionId,
+    initializeEmptyGraphSession,
+    addPlaceholderNode,
+    addEdge,
+    updateNodePosition,
   } = useImageStore();
   const [branchingModalVisible, setBranchingModalVisible] = useState(false);
   const [branchingNodeId, setBranchingNodeId] = useState<string | null>(null);
@@ -306,11 +315,19 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const [mergeConfirmVisible, setMergeConfirmVisible] = useState(false);
   const [mergeSourceNode, setMergeSourceNode] = useState<Node | null>(null);
   const [mergeTargetNode, setMergeTargetNode] = useState<Node | null>(null);
+  const [mergePlaceholderNodeId, setMergePlaceholderNodeId] = useState<string | null>(null); // Placeholder node ID 저장
   const [isMerging, setIsMerging] = useState(false);
   const [potentialMergeTargetId, setPotentialMergeTargetId] = useState<string | null>(null);
   
   // Store original positions for snap-back
   const originalPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+
+  // 초기 렌더링 시 빈 GraphSession 생성
+  useEffect(() => {
+    if (!currentGraphSession) {
+      initializeEmptyGraphSession();
+    }
+  }, []); // 최초 한 번만 실행
 
   // 현재 선택된 노드의 composition 데이터 가져오기
   const compositionData = useMemo(() => {
@@ -455,27 +472,83 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           }
         }
       } else {
-        // For non-main branches, find all nodes with matching branchId
+        // For non-main branches, start from sourceNodeId and follow branch edges
         // Find the branch source node (where this branch started)
         const branch = currentGraphSession.branches.find((b) => b.id === selectedBranchId);
         const branchSourceNodeId = branch?.sourceNodeId;
 
-        // Add all nodes in this branch
-        for (const node of currentGraphSession.nodes) {
-          const nodeBranchId = getNodeBranchId(node.id);
-          if (nodeBranchId === selectedBranchId) {
-            branchNodes.push(node.id);
-            visited.add(node.id);
-          }
-        }
-
-        // Also include the path from branch source to root (ancestor nodes in main branch)
         if (branchSourceNodeId) {
-          const ancestorPath = getPathToRoot(branchSourceNodeId);
+          // Check if this is a merge branch by looking for merge edges from sourceNodeId
+          // Merge branches have sourceNodeId that is already the actual start node
+          // (the edge from sourceNodeId to the merged node has isMergeEdge === true)
+          const mergeEdge = currentGraphSession.edges.find(
+            (e) => e.source === branchSourceNodeId && 
+                   e.type === "branch" && 
+                   e.data?.branchId === selectedBranchId &&
+                   e.data?.isMergeEdge === true
+          );
+          const isMergeBranch = !!mergeEdge;
+
+          let actualBranchStartNodeId: string;
+          if (isMergeBranch) {
+            // For merge branches, sourceNodeId is already the actual start node
+            // (it's the parent node of the merged sources, e.g., A-1)
+            actualBranchStartNodeId = branchSourceNodeId;
+          } else {
+            // For regular branching, the first branch node connects to the parent of sourceNodeId
+            // So we need to find the parent (e.g., if sourceNodeId is A, parent is A-1)
+            const sourceEdge = currentGraphSession.edges.find(
+              (e) => e.target === branchSourceNodeId
+            );
+            actualBranchStartNodeId = sourceEdge ? sourceEdge.source : branchSourceNodeId;
+          }
+
+          // Include the path from actual branch start to root (ancestor nodes in main branch)
+          const ancestorPath = getPathToRoot(actualBranchStartNodeId);
           for (const ancestorId of ancestorPath) {
             if (!visited.has(ancestorId)) {
               branchNodes.push(ancestorId);
               visited.add(ancestorId);
+            }
+          }
+
+          // Start from actualBranchStartNodeId and follow ONLY branch edges for this specific branch
+          // This ensures we only include nodes that are actually in this branch
+          // and excludes nodes from the original branch (like node A)
+          const branchNodeQueue: string[] = [actualBranchStartNodeId];
+          
+          while (branchNodeQueue.length > 0) {
+            const currentNodeId = branchNodeQueue.shift();
+            if (!currentNodeId || visited.has(currentNodeId)) continue;
+
+            // Add current node (actualBranchStartNodeId is always part of the branch)
+            if (!visited.has(currentNodeId)) {
+              branchNodes.push(currentNodeId);
+              visited.add(currentNodeId);
+            }
+
+            // Follow ONLY edges that are explicitly marked as branch edges for this branch
+            const outgoingEdges = currentGraphSession.edges.filter(
+              (e) => e.source === currentNodeId
+            );
+
+            for (const edge of outgoingEdges) {
+              // Only follow edges that are explicitly branch edges for this branch
+              // This excludes edges from the original branch (which would have different branchId or no branchId)
+              const isBranchEdge = edge.type === "branch" && edge.data?.branchId === selectedBranchId;
+              
+              if (isBranchEdge && !visited.has(edge.target)) {
+                branchNodeQueue.push(edge.target);
+              }
+            }
+          }
+        } else {
+          // Fallback: if no sourceNodeId, use old logic (shouldn't happen normally)
+          for (const node of currentGraphSession.nodes) {
+            const nodeBranchId = getNodeBranchId(node.id);
+            if (nodeBranchId === selectedBranchId) {
+              branchNodes.push(node.id);
+              visited.add(node.id);
             }
           }
         }
@@ -567,15 +640,10 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     };
   }, []);
 
-  // Get branch row index (main branch = 0, others = 1, 2, 3...)
-  const getBranchRowIndex = useCallback((branchId: string): number => {
+  // Get branch row index using unified function from imageStore
+  const getBranchRowIndexLocal = useCallback((branchId: string): number => {
     if (!currentGraphSession) return 0;
-    if (branchId === "B0") return 0;
-    
-    // Find branch index (excluding main branch)
-    const nonMainBranches = currentGraphSession.branches.filter((b) => b.id !== "B0");
-    const index = nonMainBranches.findIndex((b) => b.id === branchId);
-    return index >= 0 ? index + 1 : 1; // +1 because main branch is row 0
+    return getBranchRowIndex(branchId, currentGraphSession.branches);
   }, [currentGraphSession]);
 
   // React-flow의 nodes와 edges를 store의 데이터와 동기화
@@ -585,7 +653,28 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     // Store original positions for snap-back
     const newOriginalPositions = new Map<string, { x: number; y: number }>();
     
-    return currentGraphSession.nodes.map((node) => {
+    // Debug: Log branch positions
+    console.log("[GraphCanvas] === Branch Position Debug ===");
+    console.log(`[GraphCanvas] Total branches: ${currentGraphSession.branches.length}`);
+    console.log(`[GraphCanvas] Branch IDs in order:`, currentGraphSession.branches.map(b => b.id).join(", "));
+    
+    // Get sorted non-main branches for debugging
+    const getBranchNumber = (id: string): number => {
+      const match = id.match(/^B(\d+)$/);
+      return match ? parseInt(match[1], 10) : 0;
+    };
+    const nonMainBranches = currentGraphSession.branches
+      .filter((b) => b.id !== "B0")
+      .sort((a, b) => getBranchNumber(a.id) - getBranchNumber(b.id));
+    console.log(`[GraphCanvas] Sorted non-main branches:`, nonMainBranches.map(b => b.id).join(", "));
+    
+    currentGraphSession.branches.forEach((branch) => {
+      const rowIndex = getBranchRowIndexLocal(branch.id);
+      const yPos = GRID_START_Y + rowIndex * GRID_CELL_HEIGHT;
+      console.log(`[GraphCanvas] Branch ${branch.id}: rowIndex=${rowIndex}, y=${yPos}, nodes=${branch.nodes.length}`);
+    });
+    
+    const nodeList = currentGraphSession.nodes.map((node) => {
       const isInBranch = selectedBranchNodeIds.has(node.id);
       const isSelected = selectedNodeId === node.id;
       const isMergeTarget = node.id === potentialMergeTargetId;
@@ -596,7 +685,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       if (node.type === "image") {
         const step = node.data?.step ?? 0;
         const branchId = getNodeBranchId(node.id) || "B0";
-        const rowIndex = getBranchRowIndex(branchId);
+        const rowIndex = getBranchRowIndexLocal(branchId);
         fixedPosition = calculateGridPosition(step, rowIndex);
       } else if (node.type === "prompt") {
         // Prompt node at column -1 (before step 0)
@@ -651,6 +740,23 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         draggable: true, // Allow dragging for merge detection
       };
     });
+    
+    // Debug: Log node positions
+    console.log("[GraphCanvas] === Node Position Debug ===");
+    nodeList.forEach((node) => {
+      if (node.type === "image") {
+        const branchId = getNodeBranchId(node.id) || "B0";
+        const rowIndex = getBranchRowIndexLocal(branchId);
+        const expectedY = GRID_START_Y + rowIndex * GRID_CELL_HEIGHT;
+        console.log(
+          `[GraphCanvas] Node ${node.id}: step=${node.data?.step}, branch=${branchId}, ` +
+          `rowIndex=${rowIndex}, position=(${node.position.x.toFixed(0)}, ${node.position.y.toFixed(0)}), ` +
+          `expectedY=${expectedY.toFixed(0)}, diff=${Math.abs(node.position.y - expectedY).toFixed(0)}`
+        );
+      }
+    });
+    
+    return nodeList;
   }, [
     currentGraphSession,
     selectedNodeId,
@@ -659,7 +765,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     selectedBranchColor,
     rightmostBranchNodeId,
     getNodeBranchId,
-    getBranchRowIndex,
+    getBranchRowIndexLocal,
     calculateGridPosition,
   ]);
 
@@ -680,6 +786,16 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       const branchColor = getBranchColor(branchId);
       const isInBranch = selectedBranchEdgeIds.has(edge.id);
       const isMergeEdge = edge.data?.isMergeEdge === true;
+      const isBranchEdge = edge.type === "branch";
+
+      // Get feedback from branch if edge doesn't have it and it's a branch edge
+      let edgeFeedback = edge.data?.feedback;
+      if (!edgeFeedback && isBranchEdge && branchId !== "B0") {
+        const branch = currentGraphSession.branches.find((b) => b.id === branchId);
+        if (branch && branch.feedback && branch.feedback.length > 0) {
+          edgeFeedback = branch.feedback;
+        }
+      }
 
       // Merge edges get a special green color and dashed style
       const mergeColor = "#10b981"; // Emerald green for merge edges
@@ -692,7 +808,10 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         source: edge.source,
         target: edge.target,
         type: edge.type || "default",
-        data: edge.data,
+        data: {
+          ...edge.data,
+          feedback: edgeFeedback, // Include feedback in edge data
+        },
         animated: isInBranch,
         style: {
           stroke: isInBranch
@@ -791,7 +910,16 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       
       if (!currentGraphSession) return;
 
-      // Check for merge target
+      // Placeholder node는 자유롭게 움직일 수 있도록 위치 업데이트
+      const graphNode = currentGraphSession.nodes.find((n) => n.id === node.id);
+      if (graphNode?.type === "placeholder") {
+        // 새로운 위치 저장
+        updateNodePosition(currentGraphSession.id, node.id, node.position);
+        originalPositionsRef.current.set(node.id, node.position);
+        return;
+      }
+
+      // Check for merge target (이미지 노드인 경우에만)
       const mergeTarget = findMergeTarget(node);
       if (mergeTarget) {
         // Show merge confirmation
@@ -800,7 +928,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         setMergeConfirmVisible(true);
       }
 
-      // Always snap back to original position (grid-aligned)
+      // 이미지 노드는 항상 원래 위치로 되돌림 (grid-aligned)
       const originalPos = originalPositionsRef.current.get(node.id);
       if (originalPos) {
         setNodes((nds) =>
@@ -810,7 +938,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         );
       }
     },
-    [currentGraphSession, findMergeTarget, setNodes]
+    [currentGraphSession, findMergeTarget, setNodes, updateNodePosition]
   );
 
   // Handle merge confirmation
@@ -864,9 +992,30 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         // Update active branch in backend session meta
         setBackendSessionMeta(sessionId, result.new_branch_id);
 
-        // Calculate position for merged branch node using grid layout
-        const newBranchRowIndex = currentGraphSession.branches.length; // New branch gets next row
-        const mergeNodePosition = calculateGridPosition(mergeStartStep, newBranchRowIndex);
+        // Placeholder node가 있으면 그 위치 사용, 없으면 grid layout 계산
+        // Use the same row index calculation as getBranchRowIndex for consistency
+        let mergeNodePosition: { x: number; y: number };
+        if (mergePlaceholderNodeId) {
+          const placeholderNode = currentGraphSession.nodes.find(
+            (n) => n.id === mergePlaceholderNodeId
+          );
+          if (placeholderNode) {
+            mergeNodePosition = placeholderNode.position;
+            console.log(`[GraphCanvas] Using placeholder node position:`, mergeNodePosition);
+          } else {
+            // Calculate row index using unified function
+            // Note: branch doesn't exist yet, so we calculate based on what will exist
+            const nonMainBranches = currentGraphSession.branches.filter((b) => b.id !== "B0");
+            const newBranchRowIndex = nonMainBranches.length + 1; // +1 because main branch is row 0
+            mergeNodePosition = calculateGridPosition(mergeStartStep, newBranchRowIndex);
+          }
+        } else {
+          // Calculate row index using unified function
+          // Note: branch doesn't exist yet, so we calculate based on what will exist
+          const nonMainBranches = currentGraphSession.branches.filter((b) => b.id !== "B0");
+          const newBranchRowIndex = nonMainBranches.length + 1; // +1 because main branch is row 0
+          mergeNodePosition = calculateGridPosition(mergeStartStep, newBranchRowIndex);
+        }
 
         // Use a placeholder image or the target node's image for the initial merged node
         // The actual merged preview will be generated on the next step
@@ -876,6 +1025,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         
         // Create the merged branch and its initial node atomically
         // Connect to BOTH source nodes to visually show the merge
+        // Placeholder node가 있으면 그 node를 변환
         const newNodeId = createMergedBranchWithNode(
           graphSessionId,
           result.new_branch_id,
@@ -883,10 +1033,43 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           mergeTargetNode.id, // Second source node
           initialImageUrl,
           mergeStartStep,
-          mergeNodePosition
+          mergeNodePosition,
+          mergePlaceholderNodeId || undefined // Placeholder node ID 전달
         );
 
         console.log(`[GraphCanvas] Created merged branch node: ${newNodeId} at position:`, mergeNodePosition);
+
+        // Remove edges that were connected to placeholder node (user-drawn edges)
+        // These are the temporary edges created when user connected two image nodes to placeholder
+        // Only remove edges that have source nodes as the merge source nodes (user-drawn edges)
+        // NOT the edges from parent nodes (which are the proper merge edges)
+        if (mergePlaceholderNodeId) {
+          const finalState = useImageStore.getState();
+          const updatedSession = finalState.currentGraphSession;
+          if (updatedSession) {
+            // Find edges that target the placeholder node AND have source as one of the merge source nodes
+            // These are the user-drawn edges, not the proper merge edges from parent nodes
+            const edgesToRemove = updatedSession.edges.filter(
+              (e) => e.target === mergePlaceholderNodeId &&
+                     (e.source === mergeSourceNode.id || e.source === mergeTargetNode.id)
+            );
+            
+            if (edgesToRemove.length > 0) {
+              console.log(`[GraphCanvas] Removing ${edgesToRemove.length} user-drawn edges to placeholder node`);
+              const { currentGraphSession } = useImageStore.getState();
+              if (currentGraphSession) {
+                useImageStore.setState({
+                  currentGraphSession: {
+                    ...currentGraphSession,
+                    edges: currentGraphSession.edges.filter(
+                      (e) => !edgesToRemove.some((er) => er.id === e.id)
+                    ),
+                  },
+                });
+              }
+            }
+          }
+        }
 
         // Verify node was created
         const finalState = useImageStore.getState();
@@ -908,14 +1091,17 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       setMergeConfirmVisible(false);
       setMergeSourceNode(null);
       setMergeTargetNode(null);
+      setMergePlaceholderNodeId(null);
     }
   }, [
     mergeSourceNode,
     mergeTargetNode,
+    mergePlaceholderNodeId,
     currentGraphSession,
     backendSessionId,
     getNodeBranchId,
     calculateGridPosition,
+    getBranchRowIndexLocal,
   ]);
 
   // Handle merge cancellation
@@ -924,6 +1110,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     setMergeConfirmVisible(false);
     setMergeSourceNode(null);
     setMergeTargetNode(null);
+    setMergePlaceholderNodeId(null);
   }, []);
 
   // Handle node drag to show visual feedback for potential merge
@@ -951,9 +1138,57 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     selectNode(null);
   }, [selectNode]);
 
-  const onConnect = useCallback(() => {
-    // 자동 연결은 비활성화 (수동으로 엣지를 만들지 않음)
-  }, []);
+  const onConnect = useCallback(
+    (connection: { source: string | null; target: string | null }) => {
+      if (!currentGraphSession || !connection.source || !connection.target) {
+        return;
+      }
+
+      const sourceNode = currentGraphSession.nodes.find((n) => n.id === connection.source);
+      const targetNode = currentGraphSession.nodes.find((n) => n.id === connection.target);
+
+      if (!sourceNode || !targetNode) {
+        return;
+      }
+
+      // Placeholder node로의 연결인지 확인
+      if (targetNode.type === "placeholder" && sourceNode.type === "image") {
+        // Edge 추가
+        addEdge(currentGraphSession.id, connection.source, connection.target, {
+          isMergeEdge: true,
+        });
+
+        // Edge 추가 후 업데이트된 세션에서 확인
+        setTimeout(() => {
+          const updatedSession = useImageStore.getState().currentGraphSession;
+          if (!updatedSession) return;
+
+          // Placeholder node로 연결된 edge 개수 확인 (새로 추가한 edge 포함)
+          const edgesToPlaceholder = updatedSession.edges.filter(
+            (e) => e.target === connection.target
+          );
+          
+          // 2개의 이미지 node가 연결되었을 때만 merge 실행
+          if (edgesToPlaceholder.length >= 2) {
+            // 모든 source node 찾기
+            const sourceNodes = edgesToPlaceholder
+              .map((e) => updatedSession.nodes.find((n) => n.id === e.source))
+              .filter((n): n is GraphNode => n !== undefined && n.type === "image");
+
+            // 2개의 이미지 node가 연결되었을 때만 merge 실행
+            if (sourceNodes.length === 2) {
+              const [sourceNode1, sourceNode2] = sourceNodes;
+              setMergeSourceNode(sourceNode1 as Node);
+              setMergeTargetNode(sourceNode2 as Node);
+              setMergePlaceholderNodeId(connection.target); // Placeholder node ID 저장
+              setMergeConfirmVisible(true);
+            }
+          }
+        }, 0);
+      }
+    },
+    [currentGraphSession, addEdge]
+  );
 
   const handleBranchCreated = useCallback(
     (branchId: string, websocketUrl?: string) => {
@@ -1042,13 +1277,68 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const handleNextStep = useCallback(async () => {
     try {
       if (!currentGraphSession || !selectedNodeId) return;
-      const { backendSessionId, addImageNode, addImageNodeToBranch } =
+      const { backendSessionId, addImageNode, addImageNodeToBranch, addLoadingNode, addLoadingNodeToBranch, removeLoadingNode } =
         useImageStore.getState();
       const sessionId = backendSessionId || currentGraphSession.id;
       const targetBranchId = getTargetBranchFromSelectedNode();
       
       console.log(`[GraphCanvas] Next Step: selectedNodeId=${selectedNodeId}, targetBranchId=${targetBranchId}, stepInterval=${stepInterval}`);
       setIsStepping(true);
+      
+      // Get the last step in the branch (not the selected node's step)
+      // This ensures loading node is created based on the branch's actual last step
+      let lastStepInBranch = 0;
+      let lastNodeInBranch: GraphNode | null = null;
+      
+      if (targetBranchId === "B0") {
+        // Main branch - find the last main branch node
+        const mainImageNodes = (currentGraphSession.nodes || []).filter((n) => {
+          if (n.type !== "image") return false;
+          const inEdge = (currentGraphSession.edges || []).find((e) => e.target === n.id);
+          return !inEdge || inEdge.type !== "branch";
+        });
+        const lastMain = mainImageNodes
+          .slice()
+          .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
+          .pop();
+        if (lastMain) {
+          lastStepInBranch = lastMain.data?.step || 0;
+          lastNodeInBranch = lastMain;
+        }
+      } else {
+        // Non-main branch - find the last node in this branch
+        const branchNodes = currentGraphSession.nodes.filter((n) => {
+          if (n.type !== "image") return false;
+          const nodeBranchId = getNodeBranchId(n.id);
+          return nodeBranchId === targetBranchId;
+        });
+        const lastBranchNode = branchNodes
+          .slice()
+          .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
+          .pop();
+        if (lastBranchNode) {
+          lastStepInBranch = lastBranchNode.data?.step || 0;
+          lastNodeInBranch = lastBranchNode;
+        }
+      }
+      
+      const nextStep = lastStepInBranch + stepInterval;
+      
+      // Add loading node before starting (based on branch's last step)
+      let loadingNodeId: string | null = null;
+      if (nextStep < 50) { // Only show loading if not at max step
+        const gs = useImageStore.getState().currentGraphSession;
+        if (targetBranchId === "B0") {
+          const promptNode = gs?.nodes.find((n) => n.type === "prompt");
+          const parentNodeId = lastNodeInBranch?.id || promptNode?.id || null;
+          if (parentNodeId) {
+            const pos = calculateGridPosition(nextStep, 0);
+            loadingNodeId = addLoadingNode(sessionId, parentNodeId, nextStep, pos, targetBranchId);
+          }
+        } else {
+          loadingNodeId = addLoadingNodeToBranch(sessionId, targetBranchId, nextStep);
+        }
+      }
       
       // Run stepInterval steps, only showing the last preview
       let lastResp: Awaited<ReturnType<typeof stepOnce>> | null = null;
@@ -1063,6 +1353,10 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         // Check if we've reached the end
         if (resp.i >= resp.num_steps) {
           console.log(`[GraphCanvas] Reached end at step ${resp.i}/${resp.num_steps}`);
+          // Remove loading node if we reached the end
+          if (loadingNodeId) {
+            removeLoadingNode(sessionId, loadingNodeId);
+          }
           break;
         }
       }
@@ -1090,6 +1384,9 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         } else {
           addImageNodeToBranch(sessionId, targetBranchId, lastResp.preview_png_base64, lastResp.i);
         }
+      } else if (loadingNodeId) {
+        // Remove loading node if no preview was generated
+        removeLoadingNode(sessionId, loadingNodeId);
       }
     } catch (e) {
       console.error("[GraphCanvas] Next Step failed:", e);
@@ -1103,7 +1400,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const handleRunToEnd = useCallback(async () => {
     try {
       if (!currentGraphSession || !selectedNodeId) return;
-      const { backendSessionId } =
+      const { backendSessionId, addLoadingNode, addLoadingNodeToBranch, removeLoadingNode } =
         useImageStore.getState();
       const sessionId = backendSessionId || currentGraphSession.id;
       const targetBranchId = getTargetBranchFromSelectedNode();
@@ -1116,17 +1413,36 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       // Run step by step until completion, showing preview based on stepInterval
       let stepCount = 0;
       const maxSteps = 100; // Safety limit
+      let currentLoadingNodeId: string | null = null;
       
       while (stepCount < maxSteps) {
         // Check if paused
         if (isPausedRef.current) {
           console.log(`[GraphCanvas] Run to End paused at step ${stepCount}`);
+          if (currentLoadingNodeId) {
+            removeLoadingNode(sessionId, currentLoadingNodeId);
+            currentLoadingNodeId = null;
+          }
           break;
         }
         
         // Get fresh state for each step
         const { addImageNodeToBranch, addImageNode, currentGraphSession: gs } =
           useImageStore.getState();
+        
+        // Helper to get node branch ID (needed for loading node logic)
+        const getNodeBranchIdLocal = (nodeId: string): string | null => {
+          if (!gs) return null;
+          const node = gs.nodes.find((n) => n.id === nodeId);
+          if (node?.data?.backendBranchId) {
+            return node.data.backendBranchId as string;
+          }
+          const incoming = gs.edges.find((e) => e.target === nodeId);
+          if (incoming?.data?.branchId) {
+            return incoming.data.branchId as string;
+          }
+          return "B0";
+        };
         
         const resp = await stepOnce({
           session_id: sessionId,
@@ -1141,6 +1457,50 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         // Show if: step is divisible by interval, or it's the last step
         const isLastStep = resp.status === "done" || resp.i >= resp.num_steps;
         const shouldShowPreview = (resp.i % stepInterval === 0) || isLastStep;
+        
+        // Remove previous loading node if preview is shown
+        if (shouldShowPreview && currentLoadingNodeId) {
+          removeLoadingNode(sessionId, currentLoadingNodeId);
+          currentLoadingNodeId = null;
+        }
+        
+        // Add loading node for next step if not at end
+        // Use the branch's last step (from the response) to determine next step
+        if (!isLastStep && resp.i < 50) {
+          const nextStep = resp.i + stepInterval;
+          if (nextStep <= 50 && !currentLoadingNodeId) {
+            // Find the last node in the branch after this step
+            const branchNodes = gs?.nodes.filter((n) => {
+              if (n.type !== "image") return false;
+              if (targetBranchId === "B0") {
+                const inEdge = (gs?.edges || []).find((e) => e.target === n.id);
+                return !inEdge || inEdge.type !== "branch";
+              } else {
+                const nodeBranchId = getNodeBranchIdLocal(n.id);
+                return nodeBranchId === targetBranchId;
+              }
+            }) || [];
+            
+            const lastBranchNode = branchNodes
+              .slice()
+              .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
+              .pop();
+            
+            if (targetBranchId === "B0") {
+              const promptNode = gs?.nodes.find((n) => n.type === "prompt");
+              const parentNodeId = lastBranchNode?.id || promptNode?.id || null;
+              if (parentNodeId) {
+                const pos = calculateGridPosition(nextStep, 0);
+                currentLoadingNodeId = addLoadingNode(sessionId, parentNodeId, nextStep, pos, targetBranchId);
+              }
+            } else {
+              currentLoadingNodeId = addLoadingNodeToBranch(sessionId, targetBranchId, nextStep);
+            }
+          }
+        } else if (isLastStep && currentLoadingNodeId) {
+          removeLoadingNode(sessionId, currentLoadingNodeId);
+          currentLoadingNodeId = null;
+        }
         
         if (resp.preview_png_base64 && shouldShowPreview) {
           console.log(`[GraphCanvas] Adding preview for step ${resp.i} (interval: ${stepInterval})`);
@@ -1191,24 +1551,27 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     console.log("[GraphCanvas] Pause requested");
   }, []);
 
-  // Early return for empty state - MUST be after all hooks
-  if (!currentGraphSession) {
-    return (
-      <EmptyStateContainer>
-        <EmptyStateNode>
-          <EmptyStateLabel>안내</EmptyStateLabel>
-          <EmptyStateText>
-            그래프가 없습니다.
-            <br />
-            아래 버튼을 눌러 새 이미지 생성을 시작하세요.
-          </EmptyStateText>
-          <EmptyStateButton onClick={onAddNodeClick}>
-            <PlusIcon>+</PlusIcon>새 이미지 생성 시작
-          </EmptyStateButton>
-        </EmptyStateNode>
-      </EmptyStateContainer>
-    );
-  }
+  // Handle Add Placeholder Node button click
+  const handleAddPlaceholderNode = useCallback(() => {
+    if (!currentGraphSession) return;
+    
+    // Canvas 중앙 위치 계산 (대략적인 값)
+    const centerPosition = { x: 400, y: 300 };
+    
+    try {
+      addPlaceholderNode(
+        currentGraphSession.id,
+        centerPosition,
+        onAddNodeClick // placeholder node 클릭 시 CompositionModal 열기
+      );
+      console.log("[GraphCanvas] Placeholder node 추가됨");
+    } catch (error) {
+      console.error("[GraphCanvas] Placeholder node 추가 실패:", error);
+    }
+  }, [currentGraphSession, addPlaceholderNode, onAddNodeClick]);
+
+  // currentGraphSession이 없으면 빈 세션을 생성하므로 여기서는 항상 세션이 존재함
+  // EmptyState는 더 이상 필요하지 않음
 
   return (
     <ReactFlowProvider>
@@ -1249,6 +1612,27 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             gap: "12px",
           }}
         >
+          {/* 새로운 node 만들기 Button */}
+          <button
+            onClick={handleAddPlaceholderNode}
+            disabled={!currentGraphSession}
+            style={{
+              padding: "10px 16px",
+              borderRadius: 8,
+              border: "none",
+              fontWeight: 700,
+              cursor: !currentGraphSession ? "not-allowed" : "pointer",
+              background: !currentGraphSession
+                ? "linear-gradient(135deg, #4b5563 0%, #6b7280 100%)"
+                : "linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%)",
+              color: "#fff",
+              opacity: !currentGraphSession ? 0.6 : 1,
+            }}
+            title="새로운 node를 canvas에 추가합니다"
+          >
+            + New Node
+          </button>
+
           {/* Next Step Button */}
           <button
             onClick={handleNextStep}
@@ -1326,6 +1710,10 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           onNodeDrag={onNodeDrag}
           onNodeDragStop={onNodeDragStop}
           onPaneClick={onPaneClick}
+          onMove={(event, viewport) => {
+            // Dispatch custom event when viewport moves (zoom/pan)
+            window.dispatchEvent(new CustomEvent('reactflow-viewport-change', { detail: { viewport } }));
+          }}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           fitView

@@ -1,5 +1,5 @@
 import React, { useState, useRef } from "react";
-import styled from "styled-components";
+import styled, { keyframes } from "styled-components";
 import {
   type FeedbackArea,
   type FeedbackType,
@@ -394,6 +394,26 @@ const ActionButtonGroup = styled.div`
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 `;
 
+const spin = keyframes`
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+`;
+
+const Spinner = styled.div`
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top: 2px solid white;
+  border-radius: 50%;
+  animation: ${spin} 0.8s linear infinite;
+  margin-right: 8px;
+`;
+
 const ActionButton = styled.button<{ variant: "submit" | "cancel" }>`
   flex: 1;
   padding: 12px 20px;
@@ -403,6 +423,9 @@ const ActionButton = styled.button<{ variant: "submit" | "cancel" }>`
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 
   ${(props) =>
     props.variant === "submit"
@@ -569,6 +592,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   // BBOX 관리 (피드백을 위한 새로운 BBOX만 저장)
   const [branchingBboxes, setBranchingBboxes] = useState<BoundingBox[]>([]);
   const [selectedBboxId, setSelectedBboxId] = useState<string | null>(null);
+  const [isCreatingBranch, setIsCreatingBranch] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -691,6 +715,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   const handleCreateBranch = async () => {
     // Requirement change: 실제 새로운 브랜치를 생성하고, 선택 노드 위에 병렬 노드를 표시
     if (!nodeId || !currentGraphSession) return;
+    setIsCreatingBranch(true);
     try {
       const store = useImageStore.getState();
       const sessionId = store.backendSessionId || currentGraphSession.id;
@@ -773,17 +798,15 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
         }
       }
 
-      // Register new branch in graph
-      useImageStore.getState().createBranchInGraph(sessionId, newBranchId, nodeId);
+      // Register new branch in graph with feedback information
+      useImageStore.getState().createBranchInGraph(sessionId, newBranchId, nodeId, currentFeedbackList);
       // Create parallel node above: duplicate selected image
       const imageUrl = selectedNode?.data?.imageUrl || "";
-      // Position slightly above the selected node
-      const position = selectedNode
-        ? { x: selectedNode.position.x, y: selectedNode.position.y - 220 }
-        : { x: 0, y: 0 };
+      // Don't pass position - let addImageNodeToBranch calculate it using grid layout
+      // This ensures the node is placed at the correct rowIndex (y coordinate)
       useImageStore
         .getState()
-        .addImageNodeToBranch(sessionId, newBranchId, imageUrl, stepIdx, position);
+        .addImageNodeToBranch(sessionId, newBranchId, imageUrl, stepIdx, undefined);
       // Set backend active branch to the new one
       useImageStore.getState().setBackendSessionMeta(sessionId, newBranchId);
       clearCurrentFeedbackList();
@@ -791,6 +814,8 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     } catch (error) {
       console.error("[BranchingModal] 브랜치 생성 실패:", error);
       alert("브랜치 생성에 실패했습니다. 다시 시도해주세요.");
+    } finally {
+      setIsCreatingBranch(false);
     }
   };
 
@@ -1207,15 +1232,16 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                 )}
 
                 <ActionButtonGroup>
-                  <ActionButton variant="cancel" onClick={handleCancel}>
+                  <ActionButton variant="cancel" onClick={handleCancel} disabled={isCreatingBranch}>
                     취소
                   </ActionButton>
                   <ActionButton
                     variant="submit"
                     onClick={handleCreateBranch}
-                    disabled={currentFeedbackList.length === 0}
+                    disabled={currentFeedbackList.length === 0 || isCreatingBranch}
                   >
-                    브랜치 생성
+                    {isCreatingBranch && <Spinner />}
+                    {isCreatingBranch ? "생성 중..." : "브랜치 생성"}
                   </ActionButton>
                 </ActionButtonGroup>
               </RightColumn>
@@ -1239,15 +1265,16 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                 </InstructionText>
               )}
               <ActionButtonGroup>
-                <ActionButton variant="cancel" onClick={handleCancel}>
+                <ActionButton variant="cancel" onClick={handleCancel} disabled={isCreatingBranch}>
                   취소
                 </ActionButton>
                 <ActionButton
                   variant="submit"
                   onClick={handleCreateBranch}
-                  disabled={currentFeedbackList.length === 0}
+                  disabled={currentFeedbackList.length === 0 || isCreatingBranch}
                 >
-                  브랜치 생성
+                  {isCreatingBranch && <Spinner />}
+                  {isCreatingBranch ? "생성 중..." : "브랜치 생성"}
                 </ActionButton>
               </ActionButtonGroup>
             </>
