@@ -144,6 +144,21 @@ export interface ImageStreamState {
     interval?: number
   ) => void;
 
+  // Backend session meta (REST flow)
+  backendSessionId: string | null;
+  backendActiveBranchId: string | null;
+  setBackendSessionMeta: (sessionId: string, activeBranchId: string) => void;
+  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string) => void;
+  createMergedBranchWithNode: (
+    sessionId: string,
+    branchId: string,
+    sourceNodeId1: string, // First source node (e.g., from branch 1)
+    sourceNodeId2: string, // Second source node (e.g., from branch 2)
+    imageUrl: string,
+    step: number,
+    position: { x: number; y: number }
+  ) => string; // Returns the new node ID
+
   // 그래프 세션 관련 액션
   createGraphSession: (
     prompt: string,
@@ -207,6 +222,135 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     bboxes: [],
     selectedObjectId: null,
     isConfigured: false,
+  },
+  backendSessionId: null,
+  backendActiveBranchId: null,
+  setBackendSessionMeta: (sessionId: string, activeBranchId: string) => {
+    set({ backendSessionId: sessionId, backendActiveBranchId: activeBranchId });
+  },
+  createBranchInGraph: (sessionId: string, branchId: string, sourceNodeId: string) => {
+    const state = get();
+    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) return;
+    const exists = state.currentGraphSession.branches.find((b) => b.id === branchId);
+    if (exists) return;
+    const newBranch: Branch = {
+      id: branchId,
+      sourceNodeId,
+      feedback: [],
+      nodes: [],
+    };
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        branches: [...state.currentGraphSession.branches, newBranch],
+      },
+      backendActiveBranchId: branchId,
+    });
+  },
+
+  // Create a merged branch and its initial node atomically
+  // Connects to both source nodes to visually show the merge
+  createMergedBranchWithNode: (
+    sessionId: string,
+    branchId: string,
+    sourceNodeId1: string, // First source node (e.g., from branch 1)
+    sourceNodeId2: string, // Second source node (e.g., from branch 2)
+    imageUrl: string,
+    step: number,
+    position: { x: number; y: number }
+  ): string => {
+    const state = get();
+    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) {
+      console.warn("[ImageStore] Cannot create merged branch: session not found");
+      return "";
+    }
+    
+    // Check if branch already exists
+    const exists = state.currentGraphSession.branches.find((b) => b.id === branchId);
+    if (exists) {
+      console.warn("[ImageStore] Branch already exists:", branchId);
+      return "";
+    }
+
+    // Generate node ID
+    const nodeId = `node_merged_${branchId}_${step}_${Date.now()}`;
+    
+    // Find PARENT nodes of the source nodes (previous step nodes)
+    // This creates a proper merge visualization from the previous steps
+    const sourceEdge1 = state.currentGraphSession.edges.find(
+      (e) => e.target === sourceNodeId1
+    );
+    const sourceEdge2 = state.currentGraphSession.edges.find(
+      (e) => e.target === sourceNodeId2
+    );
+    
+    // Use parent nodes if found, otherwise fallback to source nodes
+    const parentNodeId1 = sourceEdge1 ? sourceEdge1.source : sourceNodeId1;
+    const parentNodeId2 = sourceEdge2 ? sourceEdge2.source : sourceNodeId2;
+    
+    // Create the new branch (use first parent as the primary sourceNodeId)
+    const newBranch: Branch = {
+      id: branchId,
+      sourceNodeId: parentNodeId1,
+      feedback: [],
+      nodes: [nodeId], // Include the new node
+    };
+
+    // Create the new node with merge metadata
+    const newNode: GraphNode = {
+      id: nodeId,
+      type: "image",
+      data: { 
+        imageUrl, 
+        step, 
+        sessionId, 
+        backendBranchId: branchId,
+        // Store merge info for potential UI display
+        mergedFrom: [sourceNodeId1, sourceNodeId2],
+      },
+      position,
+    };
+
+    // Create edges connecting PARENT nodes (previous step) to the merged node
+    const edge1Id = `edge_merge_${parentNodeId1}_${nodeId}`;
+    const edge1: GraphEdge = {
+      id: edge1Id,
+      source: parentNodeId1,
+      target: nodeId,
+      type: "branch",
+      data: { branchId, isMergeEdge: true },
+    };
+
+    // Only create second edge if parent nodes are different
+    const edges: GraphEdge[] = [edge1];
+    if (parentNodeId1 !== parentNodeId2) {
+      const edge2Id = `edge_merge_${parentNodeId2}_${nodeId}`;
+      const edge2: GraphEdge = {
+        id: edge2Id,
+        source: parentNodeId2,
+        target: nodeId,
+        type: "branch",
+        data: { branchId, isMergeEdge: true },
+      };
+      edges.push(edge2);
+    }
+
+    console.log(`[ImageStore] Creating merged branch ${branchId} with node ${nodeId}`);
+    console.log(`[ImageStore] Merge edges: ${parentNodeId1} -> ${nodeId}, ${parentNodeId2} -> ${nodeId}`);
+
+    // Update state atomically
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        nodes: [...state.currentGraphSession.nodes, newNode],
+        edges: [...state.currentGraphSession.edges, ...edges],
+        branches: [...state.currentGraphSession.branches, newBranch],
+      },
+      backendActiveBranchId: branchId,
+    });
+
+    console.log(`[ImageStore] Merged branch created successfully: ${branchId}, node: ${nodeId}`);
+    return nodeId;
   },
 
   // 이미지 생성 시작
@@ -1256,10 +1400,13 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return finalNodeId;
     }
 
+    // For main branch nodes, use "B0" as the backend branch ID
+    const backendBranchId = "B0";
+
     const newNode: GraphNode = {
       id: finalNodeId,
       type: "image",
-      data: { imageUrl, step, sessionId },
+      data: { imageUrl, step, sessionId, backendBranchId },
       position,
     };
 
@@ -1327,37 +1474,31 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     const finalNodeId =
       nodeId || `node_image_${sessionId}_${step}_${Date.now()}`;
 
-    // position이 제공되지 않으면 자동 계산
+    // Grid layout constants (must match GraphCanvas.tsx)
+    const GRID_CELL_WIDTH = 80;
+    const GRID_CELL_HEIGHT = 280;
+    const GRID_START_X = 100;
+    const GRID_START_Y = 50;
+
+    // Calculate branch row index (main branch = 0, others = 1, 2, 3...)
+    const getBranchRowIndex = (branchId: string): number => {
+      if (branchId === "B0") return 0;
+      const nonMainBranches = state.currentGraphSession!.branches.filter((b) => b.id !== "B0");
+      const index = nonMainBranches.findIndex((b) => b.id === branchId);
+      return index >= 0 ? index + 1 : 1;
+    };
+
+    // position이 제공되지 않으면 그리드 기반으로 자동 계산
     let finalPosition: { x: number; y: number };
     if (position) {
       finalPosition = position;
     } else {
-      // 브랜치의 마지막 노드 찾기
-      const branchNodes = state.currentGraphSession.nodes.filter((n) =>
-        branch.nodes.includes(n.id)
-      );
-      const lastNode = branchNodes[branchNodes.length - 1];
-
-      if (lastNode) {
-        // 마지막 노드의 오른쪽에 배치 (가로로 grow)
-        const horizontalSpacing = 400; // 노드 너비(300px) + 간격(100px)
-        finalPosition = {
-          x: lastNode.position.x + horizontalSpacing,
-          y: lastNode.position.y, // 같은 y 좌표 유지
-        };
-      } else {
-        // 첫 번째 노드인 경우: 소스 노드의 오른쪽에 배치
-        const sourceNode = state.currentGraphSession.nodes.find(
-          (n) => n.id === branch.sourceNodeId
-        );
-        const horizontalSpacing = 400;
-        finalPosition = sourceNode
-          ? {
-              x: sourceNode.position.x + horizontalSpacing,
-              y: sourceNode.position.y,
-            }
-          : { x: 0, y: 0 };
-      }
+      // Calculate position based on step and branch row
+      const rowIndex = getBranchRowIndex(branchId);
+      finalPosition = {
+        x: GRID_START_X + step * GRID_CELL_WIDTH,
+        y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
+      };
     }
 
     // 부모 노드 ID 찾기
@@ -1365,7 +1506,26 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       branch.nodes.includes(n.id)
     );
     const lastNode = branchNodes[branchNodes.length - 1];
-    const parentNodeId = lastNode ? lastNode.id : branch.sourceNodeId;
+    
+    // For the first node in a branch, connect to the PREVIOUS node (parent of source)
+    // This creates a proper fork visualization from the previous step
+    let parentNodeId: string;
+    if (lastNode) {
+      // Subsequent nodes connect to the last node in the branch
+      parentNodeId = lastNode.id;
+    } else {
+      // First node in branch - find the parent of the source node
+      const sourceEdge = state.currentGraphSession.edges.find(
+        (e) => e.target === branch.sourceNodeId
+      );
+      if (sourceEdge) {
+        // Connect to the parent of the source node (previous step)
+        parentNodeId = sourceEdge.source;
+      } else {
+        // Fallback to source node if no parent found (e.g., source is root)
+        parentNodeId = branch.sourceNodeId;
+      }
+    }
 
     // 이미 존재하는 노드인지 확인
     const existingNode = state.currentGraphSession.nodes.find(
@@ -1390,12 +1550,12 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     console.log(
       `[ImageStore] 새 노드 생성: nodeId=${finalNodeId}, imageUrl 길이=${
         imageUrl ? imageUrl.length : 0
-      }, step=${step}`
+      }, step=${step}, branchId=${branchId}`
     );
     const newNode: GraphNode = {
       id: finalNodeId,
       type: "image",
-      data: { imageUrl, step, sessionId },
+      data: { imageUrl, step, sessionId, backendBranchId: branchId },
       position: finalPosition,
     };
 

@@ -2,19 +2,31 @@ import React from "react";
 import { Handle, Position } from "reactflow";
 import styled from "styled-components";
 
-const NodeContainer = styled.div<{ selected: boolean }>`
+// Outer wrapper that includes the hover area for the branching button
+const NodeWrapper = styled.div`
+  position: relative;
+  padding-top: 36px; /* Space for the branching button above */
+  
+  &:hover .branching-button {
+    opacity: 1;
+    pointer-events: auto;
+  }
+`;
+
+const NodeContainer = styled.div<{ selected: boolean; isMergeTarget?: boolean }>`
   background: rgba(26, 26, 46, 0.95);
   backdrop-filter: blur(10px);
   border: 2px solid ${(props) => (props.selected ? "#6366f1" : "rgba(255, 255, 255, 0.2)")};
   border-radius: 12px;
   padding: 8px;
-  min-width: 200px;
-  max-width: 300px;
+  min-width: 180px;
+  max-width: 220px;
   box-shadow: ${(props) =>
     props.selected
       ? "0 8px 32px rgba(99, 102, 241, 0.4)"
       : "0 4px 16px rgba(0, 0, 0, 0.2)"};
   transition: all 0.2s ease;
+  position: relative;
 `;
 
 const ImageWrapper = styled.div`
@@ -24,7 +36,7 @@ const ImageWrapper = styled.div`
   border-radius: 8px;
   overflow: hidden;
   background: rgba(0, 0, 0, 0.3);
-  min-height: 200px;
+  min-height: 150px;
 `;
 
 const PlaceholderImage = styled.div`
@@ -71,32 +83,103 @@ const NodeLabel = styled.div`
   text-align: center;
 `;
 
-const BranchingButton = styled.button<{ visible: boolean }>`
+// Branching button positioned ABOVE the node container but within the wrapper's hover area
+const BranchingButton = styled.button`
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+  z-index: 100;
+  white-space: nowrap;
+
+  &:hover {
+    transform: translateX(-50%) scale(1.05);
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.5);
+  }
+
+  &:active {
+    transform: translateX(-50%) scale(0.98);
+  }
+`;
+
+// Merge indicator overlay
+const MergeIndicator = styled.div`
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-  border: none;
-  border-radius: 8px;
-  padding: 10px 20px;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border-radius: 12px;
+  padding: 16px 24px;
   color: white;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  opacity: ${(props) => (props.visible ? 1 : 0)};
-  pointer-events: ${(props) => (props.visible ? "auto" : "none")};
-  transition: all 0.2s ease;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
-  z-index: 10;
+  font-size: 16px;
+  font-weight: 700;
+  z-index: 50;
+  box-shadow: 0 8px 32px rgba(16, 185, 129, 0.5);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: pulse 1s ease-in-out infinite;
 
-  &:hover {
-    transform: translate(-50%, -50%) translateY(-2px);
-    box-shadow: 0 6px 16px rgba(99, 102, 241, 0.5);
+  @keyframes pulse {
+    0%, 100% {
+      transform: translate(-50%, -50%) scale(1);
+    }
+    50% {
+      transform: translate(-50%, -50%) scale(1.05);
+    }
+  }
+`;
+
+// Arrow indicator for the rightmost (leaf) node - points outward to the right
+const ArrowIndicator = styled.div<{ color: string }>`
+  position: absolute;
+  right: -50px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  animation: arrowPulse 1.5s ease-in-out infinite;
+
+  @keyframes arrowPulse {
+    0%, 100% {
+      opacity: 1;
+      transform: translateY(-50%) translateX(0);
+    }
+    50% {
+      opacity: 0.7;
+      transform: translateY(-50%) translateX(5px);
+    }
   }
 
-  &:active {
-    transform: translate(-50%, -50%);
+  &::before {
+    content: '';
+    width: 25px;
+    height: 4px;
+    background: ${props => props.color};
+    border-radius: 2px;
+  }
+
+  &::after {
+    content: '';
+    width: 0;
+    height: 0;
+    border-top: 8px solid transparent;
+    border-bottom: 8px solid transparent;
+    border-left: 12px solid ${props => props.color};
   }
 `;
 
@@ -105,6 +188,10 @@ interface ImageNodeData {
   step?: number;
   sessionId?: string;
   onBranchClick?: () => void;
+  isMergeTarget?: boolean;
+  isInBranch?: boolean;
+  isRightmost?: boolean;
+  branchColor?: string;
 }
 
 interface ImageNodeProps {
@@ -132,9 +219,15 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
   }, [data?.imageUrl, id, data?.step]);
 
   return (
-    <>
-      <Handle type="target" position={Position.Left} style={{ background: "#6366f1" }} />
-      <NodeContainer selected={selected || false}>
+    <NodeWrapper>
+      <Handle type="target" position={Position.Left} style={{ background: "#6366f1", top: "50%" }} />
+      
+      {/* Branching button - above the node but within hover area */}
+      <BranchingButton className="branching-button" onClick={handleBranchClick}>
+        ✨ Branching
+      </BranchingButton>
+      
+      <NodeContainer selected={selected || false} isMergeTarget={data?.isMergeTarget}>
         <ImageWrapper>
           {/* Placeholder - 항상 표시 (이미지 로드 전까지) */}
           {!imageLoaded && (
@@ -161,16 +254,25 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
           {data?.step !== undefined && imageLoaded && (
             <StepBadge>Step {data.step}</StepBadge>
           )}
-          <BranchingButton visible={selected || false} onClick={handleBranchClick}>
-            Branching
-          </BranchingButton>
+          
+          {/* Merge indicator - shown when this node is a potential merge target */}
+          {data?.isMergeTarget && (
+            <MergeIndicator>
+              🔀 Merge
+            </MergeIndicator>
+          )}
         </ImageWrapper>
-        <NodeLabel>이미지</NodeLabel>
+        <NodeLabel>Step {data?.step !== undefined ? data.step : "?"}</NodeLabel>
+        
+        {/* Arrow indicator for rightmost node - points outward */}
+        {data?.isRightmost && data?.branchColor && (
+          <ArrowIndicator color={data.branchColor} />
+        )}
       </NodeContainer>
-      <Handle type="source" position={Position.Right} style={{ background: "#6366f1" }} />
-    </>
+      
+      <Handle type="source" position={Position.Right} style={{ background: "#6366f1", top: "50%" }} />
+    </NodeWrapper>
   );
 };
 
 export default ImageNode;
-
