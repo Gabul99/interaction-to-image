@@ -709,8 +709,8 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
         incomingBranchId =
           (incoming.find((e) => e.type === "branch")?.data?.branchId as string | undefined) ||
           (store.backendActiveBranchId || "B0");
-      }
-      
+    }
+
       console.log(`[BranchingModal] Creating branch from node ${nodeId}, backend branch ${incomingBranchId}, step ${stepIdx}`);
       
       // Call backend to fork at this step

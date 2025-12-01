@@ -194,6 +194,46 @@ def _decode_x0_preview(pipe: PixArtAlphaPipeline, x0_pred: torch.Tensor) -> Imag
     return imgs[0]
 
 
+def _setup_extended_attention_kwargs(
+    br: Dict[str, Any],
+    step_index: int,
+    num_steps: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Set up cross_attention_kwargs for extended attention if this is a merged branch.
+    Returns None if extended attention should not be applied.
+    
+    The extended attention concatenates K/V from source latents to enable
+    information flow between the merged branches during self-attention.
+    """
+    merge_info = br.get("merge_source_latents")
+    if merge_info is None:
+        return None
+    
+    if not merge_info.get("extended_attention_enabled", False):
+        return None
+    
+    merge_step = merge_info.get("merge_step", 0)
+    
+    # Apply extended attention for a window after the merge
+    # Typically most effective in early-to-mid steps
+    extended_window = min(num_steps - merge_step, 30)  # Apply for up to 30 steps after merge
+    
+    if step_index < merge_step or step_index > merge_step + extended_window:
+        return None
+    
+    return {
+        "extended_attention": True,
+        "extended_scale": merge_info.get("extended_scale", 1.0),
+        "extended_steps": (merge_step, merge_step + extended_window),
+        "step_index": step_index,
+        "extended_mode": "pair",  # Use pairwise mode from GrounDiT
+        # Source latents for K/V extension
+        "source_latents_1": merge_info.get("latents_1"),
+        "source_latents_2": merge_info.get("latents_2"),
+    }
+
+
 def _snapshot_branch(br: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "i": int(br["i"]),
@@ -602,6 +642,9 @@ def step_once_engine(state: Dict[str, Any], branch_id: str) -> Tuple[Dict[str, A
             print(f"[step_once_engine] NOT applying text guidance: in_intervals={_in_intervals(i, text_intervals)}, text_list={br.get('text_list')}")
 
         with torch.no_grad():
+            # Check if this is a merged branch that needs extended attention
+            extended_kwargs = _setup_extended_attention_kwargs(br, i, num_steps)
+            
             misc_args = {
                 "do_cfg": state["do_cfg"],
                 "guidance_scale": state["guidance_scale"],
@@ -610,6 +653,12 @@ def step_once_engine(state: Dict[str, Any], branch_id: str) -> Tuple[Dict[str, A
                 "extra_step_kwargs": state["extra_step_kwargs"],
                 "latent_channels": state["latent_channels"],
             }
+            
+            # Add cross_attention_kwargs for extended attention if applicable
+            if extended_kwargs is not None:
+                print(f"[step_once_engine] Applying extended attention for merged branch at step {i}")
+                misc_args["cross_attention_kwargs"] = extended_kwargs
+            
             prompt_args = {
                 "prompt_embeds": state["prompt_embeds"],
                 "prompt_attention_mask": state["prompt_attention_mask"],
@@ -776,5 +825,237 @@ def backtrack_to_engine(state: Dict[str, Any], active_branch_id: str, step_index
     br["gallery"] = list(br.get("gallery", []))[: int(snap["i"])]
     br["last_preview"] = (br["gallery"] or [None])[-1]
     return state, f"Backtracked {active_branch_id} to step {step_index}.", br["gallery"], br["last_preview"]
+
+
+def _merge_guidance_settings(br1: Dict[str, Any], br2: Dict[str, Any], step_index: int) -> Dict[str, Any]:
+    """
+    Merge guidance settings from two branches.
+    Combines text lists, style refs, and regions from both branches.
+    """
+    merged = {}
+    
+    # Merge text guidance
+    text_list_1 = br1.get("text_list") or []
+    text_list_2 = br2.get("text_list") or []
+    text_regions_1 = br1.get("text_regions") or []
+    text_regions_2 = br2.get("text_regions") or []
+    
+    merged_text_list = list(text_list_1) + [t for t in text_list_2 if t not in text_list_1]
+    merged_text_regions = list(text_regions_1) + list(text_regions_2)[:len(text_list_2)]
+    
+    if len(merged_text_list) > 0:
+        merged["text_active_from"] = step_index
+        merged["text_list"] = merged_text_list
+        merged["text_regions"] = merged_text_regions[:len(merged_text_list)]
+        # Use max of the two scales
+        merged["text_guidance_scale"] = max(
+            br1.get("text_guidance_scale", 2.0),
+            br2.get("text_guidance_scale", 2.0)
+        )
+    else:
+        merged["text_active_from"] = None
+        merged["text_list"] = None
+        merged["text_regions"] = None
+        merged["text_guidance_scale"] = 2.0
+    
+    # Merge style/CLIP guidance
+    ref_paths_1 = br1.get("ref_image_paths") or []
+    ref_paths_2 = br2.get("ref_image_paths") or []
+    clip_regions_1 = br1.get("clip_regions") or []
+    clip_regions_2 = br2.get("clip_regions") or []
+    
+    merged_ref_paths = list(ref_paths_1) + [p for p in ref_paths_2 if p not in ref_paths_1]
+    merged_clip_regions = list(clip_regions_1) + list(clip_regions_2)[:len(ref_paths_2)]
+    
+    if len(merged_ref_paths) > 0:
+        merged["clip_active_from"] = step_index
+        merged["ref_image_paths"] = merged_ref_paths
+        merged["clip_regions"] = merged_clip_regions[:len(merged_ref_paths)]
+        merged["clip_guidance_scale"] = max(
+            br1.get("clip_guidance_scale", 5.0),
+            br2.get("clip_guidance_scale", 5.0)
+        )
+    else:
+        merged["clip_active_from"] = None
+        merged["ref_image_paths"] = None
+        merged["clip_regions"] = None
+        merged["clip_guidance_scale"] = 5.0
+    
+    return merged
+
+
+def merge_branches_engine(
+    state: Dict[str, Any],
+    branch_id_1: str,
+    branch_id_2: str,
+    step_index_1: int,
+    step_index_2: Optional[int] = None,  # If None, uses step_index_1 for both
+    merge_weight: float = 0.5,  # Weight for branch_1's latent (0.5 = equal blend)
+) -> Tuple[Dict[str, Any], str, Optional[str]]:
+    """
+    Merge two branches, allowing different steps for each branch.
+    
+    1. Takes latent from branch_1 at step_index_1
+    2. Takes latent from branch_2 at step_index_2 (or step_index_1 if not specified)
+    3. Creates a weighted average of the latents
+    4. Starts the new branch from the later of the two steps
+    5. Stores both source latents for extended attention during denoising
+    
+    Args:
+        state: Session state
+        branch_id_1: First branch to merge
+        branch_id_2: Second branch to merge  
+        step_index_1: The timestep to use from branch_1
+        step_index_2: The timestep to use from branch_2 (defaults to step_index_1)
+        merge_weight: Weight for branch_1's latent in the blend (default 0.5)
+    
+    Returns:
+        (state, status_message, new_branch_id or None if failed)
+    """
+    branches = state.get("branches", {})
+    
+    if branch_id_1 not in branches:
+        return state, f"Branch {branch_id_1} not found.", None
+    if branch_id_2 not in branches:
+        return state, f"Branch {branch_id_2} not found.", None
+    if branch_id_1 == branch_id_2:
+        return state, "Cannot merge a branch with itself.", None
+    
+    br1 = branches[branch_id_1]
+    br2 = branches[branch_id_2]
+    
+    # Default step_index_2 to step_index_1 if not provided
+    if step_index_2 is None:
+        step_index_2 = step_index_1
+    
+    step_index_1 = int(max(0, min(step_index_1, state["num_steps"])))
+    step_index_2 = int(max(0, min(step_index_2, state["num_steps"])))
+    
+    # Find snapshot for branch 1 at step_index_1
+    snap1 = None
+    for s in br1["history"]:
+        if int(s["i"]) == step_index_1:
+            snap1 = s
+            break
+    
+    # If exact step not found, use nearest available step <= target
+    if snap1 is None:
+        all_is = sorted([int(s["i"]) for s in br1["history"]])
+        nearest = 0
+        for val in all_is:
+            if val <= step_index_1:
+                nearest = val
+            else:
+                break
+        for s in br1["history"]:
+            if int(s["i"]) == nearest:
+                snap1 = s
+                break
+    
+    # Find snapshot for branch 2 at step_index_2
+    snap2 = None
+    for s in br2["history"]:
+        if int(s["i"]) == step_index_2:
+            snap2 = s
+            break
+    
+    # If exact step not found, use nearest available step <= target
+    if snap2 is None:
+        all_is = sorted([int(s["i"]) for s in br2["history"]])
+        nearest = 0
+        for val in all_is:
+            if val <= step_index_2:
+                nearest = val
+            else:
+                break
+        for s in br2["history"]:
+            if int(s["i"]) == nearest:
+                snap2 = s
+                break
+    
+    if snap1 is None:
+        return state, f"Could not find valid snapshot for {branch_id_1} at or before step {step_index_1}.", None
+    if snap2 is None:
+        return state, f"Could not find valid snapshot for {branch_id_2} at or before step {step_index_2}.", None
+    
+    actual_step_1 = int(snap1["i"])
+    actual_step_2 = int(snap2["i"])
+    
+    latents1 = snap1["latents"].detach().clone()
+    latents2 = snap2["latents"].detach().clone()
+    
+    # Create merged latent as weighted average for initial state
+    merge_weight = float(max(0.0, min(1.0, merge_weight)))
+    merged_latents = merge_weight * latents1 + (1.0 - merge_weight) * latents2
+    
+    # The merged branch starts from the later of the two steps
+    # This ensures we continue from a valid point in the denoising process
+    merge_start_step = max(actual_step_1, actual_step_2)
+    
+    # Merge guidance settings using the later step
+    merged_guidance = _merge_guidance_settings(br1, br2, merge_start_step)
+    
+    # Create new branch
+    new_id = f"B{int(state['branch_counter'])}"
+    state["branch_counter"] = int(state["branch_counter"]) + 1
+    
+    # Use scheduler from the branch at the later step
+    scheduler_source = snap1 if actual_step_1 >= actual_step_2 else snap2
+    
+    new_br = {
+        "branch_id": new_id,
+        "i": merge_start_step,
+        "latents": merged_latents,
+        "scheduler": copy.deepcopy(scheduler_source["scheduler"]),
+        "gallery": [],  # Start fresh gallery for merged branch
+        "last_preview": None,
+        # Merged guidance settings
+        "clip_active_from": merged_guidance["clip_active_from"],
+        "ref_image_paths": merged_guidance["ref_image_paths"],
+        "clip_regions": merged_guidance["clip_regions"],
+        "clip_guidance_scale": merged_guidance["clip_guidance_scale"],
+        "text_active_from": merged_guidance["text_active_from"],
+        "text_list": merged_guidance["text_list"],
+        "text_regions": merged_guidance["text_regions"],
+        "text_guidance_scale": merged_guidance["text_guidance_scale"],
+        "history": [],
+        # Extended attention: store source latents for K/V concatenation during denoising
+        "merge_source_latents": {
+            "latents_1": latents1,
+            "latents_2": latents2,
+            "branch_id_1": branch_id_1,
+            "branch_id_2": branch_id_2,
+            "step_1": actual_step_1,
+            "step_2": actual_step_2,
+            "merge_start_step": merge_start_step,
+            "extended_attention_enabled": True,
+            "extended_scale": 1.0,  # Scale factor for extended attention
+        },
+    }
+    
+    # Create initial snapshot
+    initial_snap = {
+        "i": merge_start_step,
+        "latents": merged_latents.detach().clone(),
+        "scheduler": copy.deepcopy(scheduler_source["scheduler"]),
+        "clip_active_from": merged_guidance["clip_active_from"],
+        "ref_image_paths": copy.deepcopy(merged_guidance["ref_image_paths"]),
+        "clip_regions": copy.deepcopy(merged_guidance["clip_regions"]),
+        "clip_guidance_scale": merged_guidance["clip_guidance_scale"],
+        "text_active_from": merged_guidance["text_active_from"],
+        "text_list": copy.deepcopy(merged_guidance["text_list"]),
+        "text_regions": copy.deepcopy(merged_guidance["text_regions"]),
+        "text_guidance_scale": merged_guidance["text_guidance_scale"],
+    }
+    new_br["history"].append(initial_snap)
+    
+    branches[new_id] = new_br
+    state["active_branch_id"] = new_id
+    
+    print(f"[merge_branches_engine] Created merged branch {new_id} from {branch_id_1}@step{actual_step_1} and {branch_id_2}@step{actual_step_2}")
+    print(f"[merge_branches_engine] Merged branch starts at step {merge_start_step}")
+    print(f"[merge_branches_engine] Merged guidance: text_list={merged_guidance['text_list']}, ref_paths={merged_guidance['ref_image_paths']}")
+    
+    return state, f"Merged {branch_id_1}@{actual_step_1} + {branch_id_2}@{actual_step_2} -> {new_id} at step {merge_start_step}.", new_id
 
 

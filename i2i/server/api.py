@@ -22,6 +22,7 @@ from i2i.server.engine import (  # type: ignore
     fork_current_engine,
     fork_at_step_engine,
     backtrack_to_engine,
+    merge_branches_engine,
 )
 
 
@@ -87,6 +88,15 @@ class BacktrackReq(BaseModel):
     session_id: str
     branch_id: str
     step_index: int
+
+
+class MergeBranchesReq(BaseModel):
+    session_id: str
+    branch_id_1: str
+    branch_id_2: str
+    step_index_1: int  # Step to use from branch_1
+    step_index_2: Optional[int] = None  # Step to use from branch_2 (defaults to step_index_1)
+    merge_weight: float = 0.5  # Weight for branch_1's latent (0.5 = equal blend)
 
 
 # ---------- Compatibility: health ---------- #
@@ -541,6 +551,71 @@ def select_branch(req: SelectBranchReq):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.post("/api/session/merge-branches")
+def merge_branches(req: MergeBranchesReq):
+    """
+    Merge two branches, allowing different steps for each branch.
+    
+    1. Takes latent from branch_1 at step_index_1
+    2. Takes latent from branch_2 at step_index_2 (or step_index_1 if not specified)
+    3. Creates a weighted average of the latents
+    4. Starts the new branch from the later of the two steps
+    5. Stores both source latents for extended attention during denoising
+    
+    This is triggered when user drags an intermediate node from one branch
+    to another node (can be at a different step).
+    """
+    try:
+        state = SESSIONS.get(req.session_id)
+        if state is None:
+            return JSONResponse({"error": "Invalid session_id"}, status_code=404)
+        
+        state, msg, new_branch_id = merge_branches_engine(
+            state=state,
+            branch_id_1=req.branch_id_1,
+            branch_id_2=req.branch_id_2,
+            step_index_1=int(req.step_index_1),
+            step_index_2=int(req.step_index_2) if req.step_index_2 is not None else None,
+            merge_weight=float(req.merge_weight),
+        )
+        SESSIONS[req.session_id] = state
+        
+        if new_branch_id is None:
+            return JSONResponse(
+                {
+                    "status": msg,
+                    "error": msg,
+                    "branches": list(state.get("branches", {}).keys()),
+                    "active_branch_id": state.get("active_branch_id"),
+                    "new_branch_id": None,
+                },
+                status_code=400,
+            )
+        
+        # Get info about the new merged branch
+        br = state["branches"].get(new_branch_id, {})
+        merge_info = br.get("merge_source_latents", {})
+        
+        return JSONResponse(
+            {
+                "status": msg,
+                "branches": list(state.get("branches", {}).keys()),
+                "active_branch_id": state.get("active_branch_id"),
+                "new_branch_id": new_branch_id,
+                "i": int(br.get("i", 0)),
+                "num_steps": int(state["num_steps"]),
+                "merged_from": [req.branch_id_1, req.branch_id_2],
+                "merge_steps": {
+                    "branch_1": merge_info.get("step_1", req.step_index_1),
+                    "branch_2": merge_info.get("step_2", req.step_index_2 or req.step_index_1),
+                    "start_step": merge_info.get("merge_start_step", br.get("i", 0)),
+                },
+            }
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ---------- Mount existing Gradio UI under /gradio ---------- #
 try:
     import gradio as gr  # type: ignore
@@ -550,5 +625,4 @@ try:
 except Exception:
     # If Gradio isn't available, we keep only REST API
     pass
-
 

@@ -74,6 +74,8 @@ export interface GraphNode {
     imageUrl?: string;
     step?: number;
     sessionId?: string;
+    backendBranchId?: string; // Backend branch ID for this node
+    mergedFrom?: [string, string]; // Source node IDs if this is a merged node
     // Composition 데이터 (루트 노드에만 저장)
     compositionData?: {
       bboxes: BoundingBox[];
@@ -91,6 +93,7 @@ export interface GraphEdge {
   data?: {
     feedback?: FeedbackRecord[];
     branchId?: string;
+    isMergeEdge?: boolean; // True if this edge is part of a merge
   };
 }
 
