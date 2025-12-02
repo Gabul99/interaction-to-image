@@ -131,7 +131,7 @@ const MergeIndicator = styled.div`
   position: absolute;
   top: 50%;
   left: 50%;
-  transform: translate(-50%, -50%);
+    transform: translate(-50%, -50%);
   background: linear-gradient(135deg, #10b981 0%, #059669 100%);
   border-radius: 12px;
   padding: 16px 24px;

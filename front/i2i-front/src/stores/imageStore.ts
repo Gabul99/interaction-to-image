@@ -56,52 +56,32 @@ export const isUniqueBranchId = (branchId: string): boolean => {
 };
 
 /**
- * Calculate branch row index relative to its session's prompt node row
- * Each session's branches are positioned relative to their own prompt node,
- * so branches from different sessions don't affect each other's positions.
- * 
+ * Calculate branch row index (main branch = 0, others = 1, 2, 3...)
+ * Branches are sorted by their ID number (B1, B2, B3...) to ensure consistent ordering
  * @param branchId - Branch ID (can be unique or backend format)
  * @param branches - Array of all branches in the graph session
- * @param nodes - Optional: Array of all nodes to find prompt node row (for accurate session-relative positioning)
- * @returns Row index (relative to the session's prompt node row)
+ * @returns Row index (0 for main branch, 1+ for others)
  */
 export const getBranchRowIndex = (
   branchId: string,
-  branches: Branch[],
-  nodes?: GraphNode[]
+  branches: Branch[]
 ): number => {
-  // Find the branch to get its session info
-  const branch = branches.find((b) => b.id === branchId);
-  const backendSessionId = branch?.backendSessionId;
+  // Extract backend branch ID if in unique format
   const backendBranchId = extractBackendBranchId(branchId);
   
-  // Get the prompt node's row index for this session (if nodes provided)
-  let promptRowIndex = 0;
-  if (nodes && backendSessionId) {
-    // Find the prompt node for this session
-    const promptNode = nodes.find(
-      (n) => n.type === "prompt" && n.data?.backendSessionId === backendSessionId
-    );
-    if (promptNode && typeof promptNode.data?.rowIndex === "number") {
-      promptRowIndex = promptNode.data.rowIndex;
-    }
-  } else if (nodes && branch) {
-    // Fallback: try to find prompt by tracing through the unique branch ID
-    const mainBranches = branches.filter((b) => extractBackendBranchId(b.id) === "B0");
-    const mainBranchIndex = mainBranches.findIndex((b) => 
-      b.backendSessionId === backendSessionId || b.id === branchId
-    );
-    if (mainBranchIndex >= 0) {
-      promptRowIndex = mainBranchIndex;
-    }
-  }
-  
-  // Check if this is a main branch (B0) - it should be on the same row as its prompt
+  // Check if this is a main branch (B0)
   if (backendBranchId === "B0") {
-    return promptRowIndex;
+    // For parallel sessions, each session's B0 should be on a different row
+    // Find the branch and use its index among all main branches
+    const branch = branches.find((b) => b.id === branchId);
+    if (branch) {
+      const mainBranches = branches.filter((b) => extractBackendBranchId(b.id) === "B0");
+      const mainIndex = mainBranches.findIndex((b) => b.id === branchId);
+      return mainIndex >= 0 ? mainIndex : 0;
+    }
+    return 0;
   }
 
-  // For non-main branches, calculate offset within this session's branches only
   // Extract branch number from backend ID (e.g., "B1" -> 1, "B2" -> 2)
   const getBranchNumber = (id: string): number => {
     const backendId = extractBackendBranchId(id);
@@ -109,21 +89,17 @@ export const getBranchRowIndex = (
     return match ? parseInt(match[1], 10) : 0;
   };
 
-  // Get all non-main branches for THIS SESSION only and sort by their ID number
-  const sessionNonMainBranches = branches
-    .filter((b) => {
-      const bBackendId = extractBackendBranchId(b.id);
-      const bSessionId = b.backendSessionId;
-      // Only include branches from the same session that are not B0
-      return bBackendId !== "B0" && bSessionId === backendSessionId;
-    })
+  // Count main branches (B0s) to offset non-main branches
+  const mainBranchCount = branches.filter((b) => extractBackendBranchId(b.id) === "B0").length;
+
+  // Get all non-main branches and sort by their ID number
+  const nonMainBranches = branches
+    .filter((b) => extractBackendBranchId(b.id) !== "B0")
     .sort((a, b) => getBranchNumber(a.id) - getBranchNumber(b.id));
 
   // Find the index of the target branch in the sorted array
-  const indexWithinSession = sessionNonMainBranches.findIndex((b) => b.id === branchId);
-  
-  // Return prompt row + 1 (for main branch offset) + index within session's non-main branches
-  return promptRowIndex + 1 + (indexWithinSession >= 0 ? indexWithinSession : 0);
+  const index = nonMainBranches.findIndex((b) => b.id === branchId);
+  return index >= 0 ? mainBranchCount + index : mainBranchCount; // Offset by main branch count
 };
 
 export interface ImageStep {
@@ -1887,7 +1863,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     if (!targetBranch) {
       targetBranch = state.currentGraphSession.branches.find(
         (b) => extractBackendBranchId(b.id) === "B0"
-      );
+    );
     }
 
     set({
@@ -2025,17 +2001,17 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
 
     const nodeId = `node_loading_${backendSessionId || sessionId}_${step}_${Date.now()}`;
 
-    // Calculate position using unified getBranchRowIndex (pass nodes for session-aware positioning)
+    // Calculate position using unified getBranchRowIndex
     let finalPosition: { x: number; y: number };
     if (position) {
       // If position is provided, use it but recalculate y based on rowIndex for consistency
-      const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches, state.currentGraphSession.nodes);
+      const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches);
       finalPosition = {
         x: position.x,
         y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
       };
     } else {
-      const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches, state.currentGraphSession.nodes);
+      const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches);
       finalPosition = {
         x: GRID_START_X + step * GRID_CELL_WIDTH,
         y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
@@ -2043,18 +2019,18 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     }
 
     // 부모 노드 ID 찾기
-    const branchNodes = state.currentGraphSession.nodes.filter((n) =>
-      branch.nodes.includes(n.id)
-    );
-    const lastNode = branchNodes[branchNodes.length - 1];
-    
+      const branchNodes = state.currentGraphSession.nodes.filter((n) =>
+        branch.nodes.includes(n.id)
+      );
+      const lastNode = branchNodes[branchNodes.length - 1];
+
     let parentNodeId: string;
-    if (lastNode) {
+      if (lastNode) {
       parentNodeId = lastNode.id;
-    } else {
+      } else {
       const sourceEdge = state.currentGraphSession.edges.find(
         (e) => e.target === branch.sourceNodeId
-      );
+        );
       if (sourceEdge) {
         parentNodeId = sourceEdge.source;
       } else {
@@ -2235,10 +2211,10 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return finalNodeId;
     }
 
-    // Calculate position using unified getBranchRowIndex (pass nodes for session-aware positioning)
+    // Calculate position using unified getBranchRowIndex
     // Always recalculate y based on rowIndex for consistency, even if position is provided
     let finalPosition: { x: number; y: number };
-    const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches, state.currentGraphSession.nodes);
+    const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches);
     if (position) {
       // If position is provided, use x from position but recalculate y based on rowIndex
       finalPosition = {

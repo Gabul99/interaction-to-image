@@ -747,7 +747,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
           const match = incomingBranchId.match(/^sess_[a-zA-Z0-9]+_(B\d+)$/);
           if (match) {
             incomingBranchId = match[1];
-          }
+    }
         }
       }
 
@@ -819,11 +819,11 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
       const uniqueBranchId = useImageStore.getState().createBranchInGraph(
         graphSessionId, 
         newBranchId, // backend branch ID (e.g., "B1")
-        nodeId, 
+        nodeId,
         sessionId, // backend session ID
         currentFeedbackList
       );
-      
+
       // Create parallel node above: duplicate selected image
       const imageUrl = selectedNode?.data?.imageUrl || "";
       // Don't pass position - let addImageNodeToBranch calculate it using grid layout
