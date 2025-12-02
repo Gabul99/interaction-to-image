@@ -38,7 +38,7 @@ const edgeTypes: EdgeTypes = {
 };
 
 // Grid layout constants
-const GRID_CELL_WIDTH = 60; // Horizontal spacing between nodes (reduced)
+const GRID_CELL_WIDTH = 300; // Horizontal spacing between nodes
 const GRID_CELL_HEIGHT = 280; // Vertical spacing between rows (consistent)
 const GRID_START_X = 100; // Starting X position
 const GRID_START_Y = 50; // Starting Y position for main branch (row 0)
@@ -587,41 +587,35 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     return branchId ? getBranchColor(branchId) : null;
   }, [selectedNodeId, currentGraphSession, getNodeBranchId, getBranchColor]);
 
-  // Get the rightmost node in the selected branch for the arrow indicator
+  // Get the rightmost (leaf) node in the selected branch for the arrow indicator
+  // This is the node with the highest step value in the branch
   const rightmostBranchNodeId = useMemo(() => {
     if (!selectedNodeId || !currentGraphSession) return null;
     
     const branchId = getNodeBranchId(selectedNodeId);
     if (!branchId) return null;
     
-    // Find all nodes in this branch
-    let branchNodesList: string[] = [];
+    // Find all image nodes in this branch
+    const branchImageNodes = currentGraphSession.nodes.filter((node) => {
+      if (node.type !== "image") return false;
+      const nodeBranchId = getNodeBranchId(node.id) || node.data?.uniqueBranchId;
+      return nodeBranchId === branchId;
+    });
     
-    if (branchId === "B0") {
-      // Main branch - get all main branch nodes
-      branchNodesList = Array.from(selectedBranchNodeIds);
-    } else {
-      // Non-main branch - get nodes with this branch ID
-      for (const node of currentGraphSession.nodes) {
-        if (getNodeBranchId(node.id) === branchId) {
-          branchNodesList.push(node.id);
-        }
+    if (branchImageNodes.length === 0) return null;
+    
+    // Find the node with the highest step (leaf node)
+    let leafNode = branchImageNodes[0];
+    for (const node of branchImageNodes) {
+      const nodeStep = node.data?.step ?? 0;
+      const leafStep = leafNode.data?.step ?? 0;
+      if (nodeStep > leafStep) {
+        leafNode = node;
       }
     }
     
-    // Find the node with the highest X position (rightmost)
-    let rightmostNode: { id: string; x: number } | null = null;
-    for (const nodeId of branchNodesList) {
-      const node = currentGraphSession.nodes.find((n) => n.id === nodeId);
-      if (node && node.type === "image") {
-        if (!rightmostNode || node.position.x > rightmostNode.x) {
-          rightmostNode = { id: node.id, x: node.position.x };
-        }
-      }
-    }
-    
-    return rightmostNode?.id || null;
-  }, [selectedNodeId, currentGraphSession, selectedBranchNodeIds, getNodeBranchId]);
+    return leafNode.id;
+  }, [selectedNodeId, currentGraphSession, getNodeBranchId]);
 
   // Check if the selected branch is completed (reached num_steps)
   // This is determined by checking if the rightmost node's step equals num_steps
@@ -633,29 +627,146 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     
     const step = rightmostNode.data?.step;
     // We consider the branch completed if the step is at or beyond num_steps
-    // Note: num_steps is typically 50, and steps are 0-indexed, so step 50 means done
-    // We'll check if step >= 49 (assuming 50 total steps, 0-49)
-    // But since we don't have num_steps in frontend, we check if status was "done"
-    // For now, we'll assume a branch is complete if step >= 49 (for 50 steps)
-    // This should be improved by tracking completion status from backend
-    if (step !== undefined && step >= 49) {
+    // Backend uses 50 steps (1-50), so step 50 means done
+    if (step !== undefined && step >= 50) {
       return true;
     }
     return false;
   }, [selectedNodeId, currentGraphSession, rightmostBranchNodeId]);
 
-  // Calculate grid position for a node based on step and branch
-  const calculateGridPosition = useCallback((step: number, branchIndex: number) => {
+  // Check if there's a loading node in the selected branch (hide arrow when generating)
+  const hasLoadingNodeInBranch = useMemo(() => {
+    if (!selectedNodeId || !currentGraphSession) return false;
+    
+    const branchId = getNodeBranchId(selectedNodeId);
+    if (!branchId) return false;
+    
+    // Check if any loading node exists in this branch
+    return currentGraphSession.nodes.some((node) => {
+      if (node.type !== "loading") return false;
+      const nodeBranchId = getNodeBranchId(node.id) || node.data?.uniqueBranchId;
+      return nodeBranchId === branchId;
+    });
+  }, [selectedNodeId, currentGraphSession, getNodeBranchId]);
+
+  // Calculate grid position for a node based on column index and branch
+  // Column index represents the visual position (0, 1, 2, 3...) regardless of actual step number
+  const calculateGridPosition = useCallback((columnIndex: number, branchIndex: number) => {
     return {
-      x: GRID_START_X + step * GRID_CELL_WIDTH,
+      x: GRID_START_X + columnIndex * GRID_CELL_WIDTH,
       y: GRID_START_Y + branchIndex * GRID_CELL_HEIGHT,
     };
   }, []);
 
+  // Calculate column index for a step based on the node's position in the branch
+  // This ensures consistent spacing: with interval 5, step 5 -> column 1, step 10 -> column 2, etc.
+  // For non-main branches, the first node should align with the source node's column + 1
+  // This function handles nested branches (branches from branches) recursively
+  const getColumnIndexForStep = useCallback((step: number, branchId: string | null): number => {
+    if (step === 0) return 0;
+    if (!currentGraphSession || !branchId) {
+      // Fallback: use step / stepInterval for rough positioning
+      return Math.ceil(step / stepInterval);
+    }
+    
+    // Helper to get nodes belonging to a specific branch
+    const getBranchNodes = (bId: string) => {
+      return currentGraphSession.nodes
+        .filter((n) => {
+          if (n.type !== "image") return false;
+          const nodeBranchId = n.data?.uniqueBranchId || n.data?.backendBranchId;
+          if (nodeBranchId === bId) return true;
+          const incoming = currentGraphSession.edges.find((e) => e.target === n.id);
+          if (incoming?.data?.branchId === bId) return true;
+          return false;
+        })
+        .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0));
+    };
+    
+    // Recursive helper to calculate the column of a source node
+    // This traces back through the branch hierarchy to find the correct column
+    const getSourceNodeColumn = (sourceNodeId: string, visited: Set<string> = new Set()): number => {
+      // Prevent infinite loops
+      if (visited.has(sourceNodeId)) return 1;
+      visited.add(sourceNodeId);
+      
+      const sourceNode = currentGraphSession.nodes.find((n) => n.id === sourceNodeId);
+      if (!sourceNode || sourceNode.type !== "image") return 1;
+      
+      const sourceStep = sourceNode.data?.step || 0;
+      const sourceBranchId = (sourceNode.data?.uniqueBranchId || sourceNode.data?.backendBranchId) as string;
+      
+      if (!sourceBranchId) return Math.ceil(sourceStep / stepInterval);
+      
+      const sourceBackendBranchId = extractBackendBranchId(sourceBranchId);
+      
+      if (sourceBackendBranchId === "B0") {
+        // Source is from main branch: column based on node index in main branch
+        const mainBranchNodes = getBranchNodes(sourceBranchId);
+        const sourceIndex = mainBranchNodes.findIndex((n) => n.data?.step === sourceStep);
+        return sourceIndex >= 0 ? sourceIndex + 1 : Math.ceil(sourceStep / stepInterval);
+      } else {
+        // Source is from another non-main branch: recursively find its column
+        const sourceBranch = currentGraphSession.branches.find((b) => b.id === sourceBranchId);
+        if (sourceBranch?.sourceNodeId) {
+          const parentColumn = getSourceNodeColumn(sourceBranch.sourceNodeId, visited);
+          const sourceBranchNodes = getBranchNodes(sourceBranchId);
+          const sourceIndex = sourceBranchNodes.findIndex((n) => n.data?.step === sourceStep);
+          return parentColumn + (sourceIndex >= 0 ? sourceIndex : 0);
+        }
+        return 1;
+      }
+    };
+    
+    // Find the branch
+    const branch = currentGraphSession.branches.find((b) => b.id === branchId);
+    const backendBranchId = branch?.backendBranchId || extractBackendBranchId(branchId);
+    
+    // Get all image nodes in this branch, sorted by step
+    const branchImageNodes = getBranchNodes(branchId);
+    
+    // For main branch (B0), use sequential column index based on node order
+    if (backendBranchId === "B0") {
+      const index = branchImageNodes.findIndex((n) => n.data?.step === step);
+      if (index >= 0) {
+        return index + 1;
+      }
+      const nodesBeforeThisStep = branchImageNodes.filter((n) => (n.data?.step || 0) < step).length;
+      return nodesBeforeThisStep + 1;
+    }
+    
+    // For non-main branches:
+    // - First node should be at the SAME column as the source node (they share the same step)
+    // - Subsequent nodes continue from there
+    if (branch?.sourceNodeId) {
+      const sourceColumn = getSourceNodeColumn(branch.sourceNodeId);
+      
+      // Find the index of this step within the branch
+      const index = branchImageNodes.findIndex((n) => n.data?.step === step);
+      if (index >= 0) {
+        // First node (index 0) is at sourceColumn, subsequent nodes are at sourceColumn + index
+        return sourceColumn + index;
+      }
+      
+      // If step not found (e.g., for loading nodes), calculate based on where it would be inserted
+      const nodesBeforeThisStep = branchImageNodes.filter((n) => (n.data?.step || 0) < step).length;
+      return sourceColumn + nodesBeforeThisStep;
+    }
+    
+    // Fallback
+    return Math.ceil(step / stepInterval);
+  }, [currentGraphSession, stepInterval]);
+
   // Calculate position for a new node, applying prompt offset if the prompt has been moved
+  // For new nodes being added (not yet in the graph), we use getColumnIndexForStep to calculate position
+  // This ensures consistent positioning with existing nodes
   const calculatePositionWithOffset = useCallback(
-    (step: number, rowIndex: number, promptNodeId: string | null): { x: number; y: number } => {
-      const basePosition = calculateGridPosition(step, rowIndex);
+    (step: number, rowIndex: number, promptNodeId: string | null, branchId?: string): { x: number; y: number } => {
+      // Use getColumnIndexForStep to calculate the column index
+      // This handles both main and non-main branches correctly, including nested branches
+      const columnIndex = getColumnIndexForStep(step, branchId || null);
+      
+      const basePosition = calculateGridPosition(columnIndex, rowIndex);
       
       if (promptNodeId) {
         const offset = promptOffsetRef.current.get(promptNodeId);
@@ -669,13 +780,30 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       
       return basePosition;
     },
-    [calculateGridPosition]
+    [calculateGridPosition, getColumnIndexForStep]
   );
 
   // Get branch row index using unified function from imageStore
+  // Pass the session's base row (from prompt node's rowIndex) for proper session-independent positioning
   const getBranchRowIndexLocal = useCallback((branchId: string): number => {
     if (!currentGraphSession) return 0;
-    return getBranchRowIndex(branchId, currentGraphSession.branches);
+    
+    // Find the branch to get its session ID
+    const branch = currentGraphSession.branches.find((b) => b.id === branchId);
+    const backendSessionId = branch?.backendSessionId;
+    
+    // Find the prompt node for this session to get its base row
+    let sessionBaseRow: number | undefined;
+    if (backendSessionId) {
+      const promptNode = currentGraphSession.nodes.find(
+        (n) => n.type === "prompt" && n.data?.backendSessionId === backendSessionId
+      );
+      if (promptNode?.data?.rowIndex !== undefined) {
+        sessionBaseRow = promptNode.data.rowIndex as number;
+      }
+    }
+    
+    return getBranchRowIndex(branchId, currentGraphSession.branches, sessionBaseRow);
   }, [currentGraphSession]);
 
   // React-flow의 nodes와 edges를 store의 데이터와 동기화
@@ -747,7 +875,9 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         const step = node.data?.step ?? 0;
         const branchId = getNodeBranchId(node.id) || "B0";
         const rowIndex = getBranchRowIndexLocal(branchId);
-        let basePosition = calculateGridPosition(step, rowIndex);
+        // Use column index for consistent spacing regardless of preview interval
+        const columnIndex = getColumnIndexForStep(step, branchId);
+        let basePosition = calculateGridPosition(columnIndex, rowIndex);
         // Apply prompt offset if the prompt has been moved
         if (hasPromptBeenMoved && promptOffset) {
           basePosition = {
@@ -757,11 +887,11 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         }
         fixedPosition = basePosition;
       } else if (node.type === "prompt") {
-        // Prompt node at column -1 (before step 0)
+        // Prompt node at column 0 (before first image)
         // Use rowIndex from node data for parallel prompt nodes
         const promptRowIndex = node.data?.rowIndex ?? 0;
         let basePosition = { 
-          x: GRID_START_X - GRID_CELL_WIDTH, 
+          x: GRID_START_X, 
           y: GRID_START_Y + promptRowIndex * GRID_CELL_HEIGHT 
         };
         // Apply prompt offset if this prompt has been moved
@@ -773,11 +903,33 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         }
         fixedPosition = basePosition;
       } else if (node.type === "loading") {
-        // Loading nodes use the same positioning as image nodes
-        const step = node.data?.step ?? 0;
-        const branchId = getNodeBranchId(node.id) || "B0";
-        const rowIndex = getBranchRowIndexLocal(branchId);
-        let basePosition = calculateGridPosition(step, rowIndex);
+        // Loading nodes: position at the next column after the last image node in the branch
+        const branchId = getNodeBranchId(node.id) || node.data?.uniqueBranchId || "B0";
+        const rowIndex = getBranchRowIndexLocal(branchId as string);
+        
+        // Find all image nodes in this branch, sorted by step
+        const branchImageNodes = currentGraphSession.nodes
+          .filter((n) => {
+            if (n.type !== "image") return false;
+            const nodeBranchId = getNodeBranchId(n.id) || n.data?.uniqueBranchId;
+            return nodeBranchId === branchId;
+          })
+          .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0));
+        
+        let columnIndex: number;
+        if (branchImageNodes.length > 0) {
+          // Get the column of the last (leaf) node in the branch and add 1
+          const lastNode = branchImageNodes[branchImageNodes.length - 1];
+          const lastNodeStep = lastNode.data?.step || 0;
+          const lastNodeColumn = getColumnIndexForStep(lastNodeStep, branchId as string);
+          columnIndex = lastNodeColumn + 1;
+        } else {
+          // No image nodes yet - use getColumnIndexForStep with the loading node's step
+          const loadingStep = node.data?.step || 0;
+          columnIndex = getColumnIndexForStep(loadingStep, branchId as string);
+        }
+        
+        let basePosition = calculateGridPosition(columnIndex, rowIndex);
         // Apply prompt offset if the prompt has been moved
         if (hasPromptBeenMoved && promptOffset) {
           basePosition = {
@@ -830,9 +982,9 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
               : undefined,
           isMergeTarget,
           isInBranch,
-          // Only show arrow indicator if this is the rightmost node AND the branch is NOT completed
-          isRightmost: isRightmost && !isBranchCompleted,
-          branchColor: isRightmost && !isBranchCompleted ? selectedBranchColor : undefined,
+          // Only show arrow indicator if this is the rightmost node AND the branch is NOT completed AND no loading node exists
+          isRightmost: isRightmost && !isBranchCompleted && !hasLoadingNodeInBranch,
+          branchColor: isRightmost && !isBranchCompleted && !hasLoadingNodeInBranch ? selectedBranchColor : undefined,
         },
         selected: isSelected,
         style: nodeStyle,
@@ -864,9 +1016,11 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     selectedBranchColor,
     rightmostBranchNodeId,
     isBranchCompleted,
+    hasLoadingNodeInBranch,
     getNodeBranchId,
     getBranchRowIndexLocal,
     calculateGridPosition,
+    getColumnIndexForStep,
   ]);
 
   // Update original positions ref when nodes change
@@ -1134,8 +1288,15 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     // Calculate merge start step (before API call, for loading node)
     const mergeStartStep = Math.max(sourceStep, targetStep);
     
+    // Find the node with the larger step to determine the merge column
+    const nodeWithLargerStep = sourceStep >= targetStep ? mergeSourceNode : mergeTargetNode;
+    const largerStepBranchId = getNodeBranchId(nodeWithLargerStep.id);
+    
+    // Calculate column for merged node - should be at the same column as the node with larger step
+    const mergeColumn = getColumnIndexForStep(mergeStartStep, largerStepBranchId);
+    
     // Calculate row index for the new branch
-    const nonMainBranches = currentGraphSession.branches.filter((b) => b.id !== "B0");
+    const nonMainBranches = currentGraphSession.branches.filter((b) => extractBackendBranchId(b.id) !== "B0");
     const newBranchRowIndex = nonMainBranches.length + 1; // +1 because main branch is row 0
     
     // Calculate position for loading/merged node
@@ -1148,11 +1309,15 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         mergeNodePosition = placeholderNode.position;
         console.log(`[GraphCanvas] Using placeholder node position:`, mergeNodePosition);
       } else {
-        mergeNodePosition = calculateGridPosition(mergeStartStep, newBranchRowIndex);
+        // For new merged branch, position at the same column as the node with larger step
+        mergeNodePosition = calculateGridPosition(mergeColumn, newBranchRowIndex);
       }
     } else {
-      mergeNodePosition = calculateGridPosition(mergeStartStep, newBranchRowIndex);
+      // For new merged branch, position at the same column as the node with larger step
+      mergeNodePosition = calculateGridPosition(mergeColumn, newBranchRowIndex);
     }
+    
+    console.log(`[GraphCanvas] Merge: largerStep=${mergeStartStep}, column=${mergeColumn}, row=${newBranchRowIndex}`);
     
     // Add loading node BEFORE API call to show progress
     // We'll create a temporary branch ID for the loading node
@@ -1196,11 +1361,9 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         // Get the actual merge start step from the response (may differ from our estimate)
         const actualMergeStartStep = result.merge_steps?.start_step ?? mergeStartStep;
         
-        // Recalculate position if step changed
-        let finalMergePosition = mergeNodePosition;
-        if (actualMergeStartStep !== mergeStartStep && !mergePlaceholderNodeId) {
-          finalMergePosition = calculateGridPosition(actualMergeStartStep, newBranchRowIndex);
-        }
+        // Position is already calculated for column 1 (first node in merged branch)
+        // No need to recalculate based on step since we use column-based positioning
+        const finalMergePosition = mergeNodePosition;
         
         console.log(`[GraphCanvas] Creating merged branch: ${result.new_branch_id} in session ${graphSessionId}`);
         console.log(`[GraphCanvas] Source nodes: ${mergeSourceNode.id}@${sourceStep}, ${mergeTargetNode.id}@${targetStep}`);
@@ -1274,6 +1437,10 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
         if (!newNodeId) {
           console.warn(`[GraphCanvas] Merge request processed but node creation failed`);
+        } else {
+          // Select the newly created merged branch node
+          selectNode(newNodeId);
+          console.log(`[GraphCanvas] Selected merged branch node: ${newNodeId}`);
         }
       }
     } catch (error) {
@@ -1301,6 +1468,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     getNodeBranchId,
     calculateGridPosition,
     getBranchRowIndexLocal,
+    selectNode,
   ]);
 
   // Handle merge cancellation
@@ -1375,7 +1543,9 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             const step = childNode.data?.step ?? 0;
             const branchId = getNodeBranchId(childId) || "B0";
             const rowIndex = getBranchRowIndexLocal(branchId);
-            basePosition = calculateGridPosition(step, rowIndex);
+            // Use column index for consistent spacing
+            const columnIndex = getColumnIndexForStep(step, branchId);
+            basePosition = calculateGridPosition(columnIndex, rowIndex);
           } else {
             // For other node types, use their stored position
             basePosition = childNode.position;
@@ -1400,7 +1570,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         console.log(`[GraphCanvas] Started dragging prompt node ${node.id} with ${childNodeIds.length} children`);
       }
     },
-    [getAllDescendants, currentGraphSession, getNodeBranchId, getBranchRowIndexLocal, calculateGridPosition]
+    [getAllDescendants, currentGraphSession, getNodeBranchId, getBranchRowIndexLocal, calculateGridPosition, getColumnIndexForStep]
   );
 
   const onNodeClick = useCallback(
@@ -1622,7 +1792,13 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         }
       }
       
-      const nextStep = lastStepInBranch + stepInterval;
+      // Calculate the next preview step based on interval
+      // The next preview should be at the next multiple of stepInterval after lastStepInBranch
+      // For example: if lastStepInBranch=5 and interval=5, next preview should be at step 10 (next multiple of 5)
+      // If lastStepInBranch=9 and interval=5, next preview should be at step 10
+      const nextPreviewStep = Math.ceil((lastStepInBranch + 1) / stepInterval) * stepInterval;
+      
+      console.log(`[GraphCanvas] Next Step calculation: lastStepInBranch=${lastStepInBranch}, stepInterval=${stepInterval}, nextPreviewStep=${nextPreviewStep}`);
       
       // Add loading node before starting (based on branch's last step)
       // Use graph session ID for loading nodes
@@ -1636,27 +1812,34 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       ) || gs?.nodes.find((n) => n.type === "prompt");
       const promptNodeId = promptNode?.id || null;
       
-      if (nextStep < 50) { // Only show loading if not at max step
+      if (nextPreviewStep < 50) { // Only show loading if not at max step
         const parentNodeId = lastNodeInBranch?.id || promptNodeId || null;
         if (parentNodeId) {
           // Get row index - for non-main branches, use the branch's row index
           const rowIndex = isMainBranch 
             ? (promptNode?.data?.rowIndex ?? 0)
             : getBranchRowIndexLocal(uniqueBranchId);
-          const pos = calculatePositionWithOffset(nextStep, rowIndex, promptNodeId);
-          loadingNodeId = addLoadingNode(graphSessionId, parentNodeId, nextStep, pos, uniqueBranchId);
+          const pos = calculatePositionWithOffset(nextPreviewStep, rowIndex, promptNodeId, uniqueBranchId);
+          loadingNodeId = addLoadingNode(graphSessionId, parentNodeId, nextPreviewStep, pos, uniqueBranchId);
         }
       }
       
-      // Run stepInterval steps, only showing the last preview
+      // Run steps until we reach the next preview step (or reach the end)
+      // This handles the case where backend step might be different from frontend's lastStepInBranch
+      // (e.g., after backtracking, backend might be at step 9 while frontend shows last node at step 5)
       let lastResp: Awaited<ReturnType<typeof stepOnce>> | null = null;
+      const maxIterations = 50; // Safety limit
+      let iterations = 0;
       
-      for (let i = 0; i < stepInterval; i++) {
+      while (iterations < maxIterations) {
         const resp = await stepOnce({
           session_id: sessionId, // Use backend session ID for API calls
           branch_id: backendBranchId, // Use backend branch ID for API calls
         });
         lastResp = resp;
+        iterations++;
+        
+        console.log(`[GraphCanvas] Step iteration ${iterations}: backend now at step ${resp.i}, target preview step=${nextPreviewStep}`);
         
         // Check if we've reached the end
         if (resp.i >= resp.num_steps) {
@@ -1665,6 +1848,12 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           if (loadingNodeId) {
             removeLoadingNode(graphSessionId, loadingNodeId);
           }
+          break;
+        }
+        
+        // Check if we've reached the next preview step
+        if (resp.i >= nextPreviewStep) {
+          console.log(`[GraphCanvas] Reached preview step ${resp.i} (target was ${nextPreviewStep})`);
           break;
         }
       }
@@ -1699,16 +1888,38 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             ? (promptNodeAfter?.data?.rowIndex ?? 0)
             : getBranchRowIndexLocal(uniqueBranchId);
           // Position calculated with offset if prompt has been moved
-          const pos = calculatePositionWithOffset(lastResp.i, rowIndex, promptNodeIdAfter);
+          // IMPORTANT: Use the same step as the loading node (nextStep) to ensure proper replacement
+          // The loading node was created at nextStep, so we should add the image at the same step
+          const actualStep = lastResp.i;
+          const pos = calculatePositionWithOffset(actualStep, rowIndex, promptNodeIdAfter, uniqueBranchId);
+          
+          console.log(`[GraphCanvas] Adding image node: step=${actualStep}, loadingNodeStep=${nextPreviewStep}, uniqueBranchId=${uniqueBranchId}`);
+          
+          // If loading node step doesn't match the actual step from backend, remove loading node first
+          if (loadingNodeId && actualStep !== nextPreviewStep) {
+            console.warn(`[GraphCanvas] Step mismatch: loading node at ${nextPreviewStep}, backend returned ${actualStep}. Removing loading node.`);
+            removeLoadingNode(currentGsId, loadingNodeId);
+          }
+          
           // Pass uniqueBranchId explicitly to ensure correct branch association
-          addImageNode(currentGsId, parentNodeId, lastResp.preview_png_base64, lastResp.i, pos, undefined, uniqueBranchId);
-                  }
+          addImageNode(currentGsId, parentNodeId, lastResp.preview_png_base64, actualStep, pos, undefined, uniqueBranchId);
+          
+          // Ensure loading node is removed if it still exists (in case addImageNode didn't find it)
+          if (loadingNodeId) {
+            const stateAfterAdd = useImageStore.getState().currentGraphSession;
+            const loadingStillExists = stateAfterAdd?.nodes.some((n) => n.id === loadingNodeId && n.type === "loading");
+            if (loadingStillExists) {
+              console.warn(`[GraphCanvas] Loading node ${loadingNodeId} still exists after addImageNode, removing it`);
+              removeLoadingNode(currentGsId, loadingNodeId);
+            }
+          }
+        }
       } else if (loadingNodeId) {
         // Remove loading node if no preview was generated
         const gs = useImageStore.getState().currentGraphSession;
         const currentGsId = gs?.id || currentGraphSession.id;
         removeLoadingNode(currentGsId, loadingNodeId);
-                }
+      }
               } catch (e) {
                 console.error("[GraphCanvas] Next Step failed:", e);
               } finally {
@@ -1748,6 +1959,83 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       const maxSteps = 100; // Safety limit
       let currentLoadingNodeId: string | null = null;
       
+      // Helper to get node unique branch ID
+      const getNodeBranchIdHelper = (nodeId: string, gsState: typeof currentGraphSession | null): string | null => {
+        if (!gsState) return null;
+        const node = gsState.nodes.find((n) => n.id === nodeId);
+        if (node?.data?.uniqueBranchId) {
+          return node.data.uniqueBranchId as string;
+        }
+        const incoming = gsState.edges.find((e) => e.target === nodeId);
+        if (incoming?.data?.branchId) {
+          return incoming.data.branchId as string;
+        }
+        if (node?.data?.backendBranchId && node?.data?.backendSessionId) {
+          return createUniqueBranchId(node.data.backendSessionId as string, node.data.backendBranchId as string);
+        }
+        return node?.data?.backendBranchId as string || null;
+      };
+      
+      // Helper to create loading node for the next preview step
+      const createLoadingNodeForNextPreview = (currentStep: number): string | null => {
+        const gs = useImageStore.getState().currentGraphSession;
+        if (!gs) return null;
+        
+        // Calculate next preview step (next multiple of stepInterval after currentStep)
+        const nextPreviewStep = Math.ceil((currentStep + 1) / stepInterval) * stepInterval;
+        
+        if (nextPreviewStep > 50) return null;
+        
+        // Find the last node in the branch
+        const branchNodes = gs.nodes.filter((n) => {
+          if (n.type !== "image") return false;
+          const nodeBranchId = getNodeBranchIdHelper(n.id, gs);
+          return nodeBranchId === uniqueBranchId;
+        });
+        
+        const lastBranchNode = branchNodes
+          .slice()
+          .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
+          .pop();
+        
+        // Find the prompt node for this session
+        const promptNode = gs.nodes.find((n) => 
+          n.type === "prompt" && n.data?.backendSessionId === backendSession
+        ) || gs.nodes.find((n) => n.type === "prompt");
+        const promptNodeIdLocal = promptNode?.id || null;
+        const parentNodeId = lastBranchNode?.id || promptNodeIdLocal || null;
+        
+        if (!parentNodeId) return null;
+        
+        const rowIndex = isMainBranch 
+          ? (promptNode?.data?.rowIndex ?? 0)
+          : getBranchRowIndexLocal(uniqueBranchId);
+        const pos = calculatePositionWithOffset(nextPreviewStep, rowIndex, promptNodeIdLocal, uniqueBranchId);
+        
+        const loadingId = addLoadingNode(graphSessionId, parentNodeId, nextPreviewStep, pos, uniqueBranchId);
+        console.log(`[GraphCanvas] Run to End: Created loading node at step ${nextPreviewStep}`);
+        return loadingId;
+      };
+      
+      // Create initial loading node before starting the loop
+      // Find the last step in the branch to calculate the first preview step
+      {
+        const gsInit = useImageStore.getState().currentGraphSession;
+        if (gsInit) {
+          const branchNodesInit = gsInit.nodes.filter((n) => {
+            if (n.type !== "image") return false;
+            const nodeBranchId = getNodeBranchIdHelper(n.id, gsInit);
+            return nodeBranchId === uniqueBranchId;
+          });
+          const lastBranchNodeInit = branchNodesInit
+            .slice()
+            .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
+            .pop();
+          const lastStepInit = lastBranchNodeInit?.data?.step || 0;
+          currentLoadingNodeId = createLoadingNodeForNextPreview(lastStepInit);
+        }
+      }
+      
       while (stepCount < maxSteps) {
         // Check if paused
         if (isPausedRef.current) {
@@ -1763,24 +2051,6 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         const { addImageNode: addImageNodeFresh, currentGraphSession: gs } =
           useImageStore.getState();
         
-        // Helper to get node unique branch ID (needed for loading node logic)
-        const getNodeBranchIdLocal = (nodeId: string): string | null => {
-          if (!gs) return null;
-          const node = gs.nodes.find((n) => n.id === nodeId);
-          if (node?.data?.uniqueBranchId) {
-            return node.data.uniqueBranchId as string;
-          }
-          const incoming = gs.edges.find((e) => e.target === nodeId);
-          if (incoming?.data?.branchId) {
-            return incoming.data.branchId as string;
-          }
-          // Legacy fallback
-          if (node?.data?.backendBranchId && node?.data?.backendSessionId) {
-            return createUniqueBranchId(node.data.backendSessionId as string, node.data.backendBranchId as string);
-          }
-          return node?.data?.backendBranchId as string || null;
-        };
-        
         const resp = await stepOnce({
           session_id: backendSession, // Use backend session ID for API calls
           branch_id: backendBranchId, // Use backend branch ID for API calls
@@ -1795,45 +2065,8 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         const isLastStep = resp.status === "done" || resp.i >= resp.num_steps;
         const shouldShowPreview = (resp.i % stepInterval === 0) || isLastStep;
         
-        // Remove previous loading node if preview is shown
-        if (shouldShowPreview && currentLoadingNodeId) {
-          removeLoadingNode(graphSessionId, currentLoadingNodeId);
-          currentLoadingNodeId = null;
-        }
-        
-        // Add loading node for next step if not at end
-        // Use the branch's last step (from the response) to determine next step
-        if (!isLastStep && resp.i < 50) {
-          const nextStep = resp.i + stepInterval;
-          if (nextStep <= 50 && !currentLoadingNodeId) {
-            // Find the last node in the branch after this step (filter by unique branch ID)
-            const branchNodes = gs?.nodes.filter((n) => {
-              if (n.type !== "image") return false;
-              const nodeBranchId = getNodeBranchIdLocal(n.id);
-              return nodeBranchId === uniqueBranchId;
-            }) || [];
-            
-            const lastBranchNode = branchNodes
-              .slice()
-              .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
-              .pop();
-            
-            // Find the prompt node for this session (needed for offset calculation)
-            const promptNode = gs?.nodes.find((n) => 
-              n.type === "prompt" && n.data?.backendSessionId === backendSession
-            ) || gs?.nodes.find((n) => n.type === "prompt");
-            const promptNodeIdLocal = promptNode?.id || null;
-            const parentNodeId = lastBranchNode?.id || promptNodeIdLocal || null;
-            if (parentNodeId) {
-              // Get row index - for non-main branches, use the branch's row index
-              const rowIndex = isMainBranch 
-                ? (promptNode?.data?.rowIndex ?? 0)
-                : getBranchRowIndexLocal(uniqueBranchId);
-              const pos = calculatePositionWithOffset(nextStep, rowIndex, promptNodeIdLocal);
-              currentLoadingNodeId = addLoadingNode(graphSessionId, parentNodeId, nextStep, pos, uniqueBranchId);
-            }
-          }
-        } else if (isLastStep && currentLoadingNodeId) {
+        // Remove loading node when we're about to show a preview or at the end
+        if ((shouldShowPreview || isLastStep) && currentLoadingNodeId) {
           removeLoadingNode(graphSessionId, currentLoadingNodeId);
           currentLoadingNodeId = null;
         }
@@ -1852,7 +2085,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           // Find the last node in this branch (filter by unique branch ID)
           const branchImageNodes = (gs?.nodes || []).filter((n) => {
             if (n.type !== "image") return false;
-            const nodeBranchId = getNodeBranchIdLocal(n.id);
+            const nodeBranchId = getNodeBranchIdHelper(n.id, gs);
             return nodeBranchId === uniqueBranchId;
           });
           const lastBranchNode = branchImageNodes
@@ -1867,9 +2100,14 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
               ? (promptNode?.data?.rowIndex ?? 0)
               : getBranchRowIndexLocal(uniqueBranchId);
             // Position calculated with offset if prompt has been moved
-            const pos = calculatePositionWithOffset(resp.i, rowIndex, promptNodeIdLocal);
+            const pos = calculatePositionWithOffset(resp.i, rowIndex, promptNodeIdLocal, uniqueBranchId);
             // Pass uniqueBranchId explicitly to ensure correct branch association
             addImageNodeFresh(currentGsId, parentNodeId, resp.preview_png_base64, resp.i, pos, undefined, uniqueBranchId);
+            
+            // Create loading node for the next preview step (if not at the end)
+            if (!isLastStep) {
+              currentLoadingNodeId = createLoadingNodeForNextPreview(resp.i);
+            }
           }
         }
         

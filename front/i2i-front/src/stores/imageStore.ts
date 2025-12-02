@@ -56,50 +56,98 @@ export const isUniqueBranchId = (branchId: string): boolean => {
 };
 
 /**
- * Calculate branch row index (main branch = 0, others = 1, 2, 3...)
- * Branches are sorted by their ID number (B1, B2, B3...) to ensure consistent ordering
- * @param branchId - Branch ID (can be unique or backend format)
+ * Calculate branch row index within its own session
+ * Each session has independent row space - branches from different sessions don't affect each other
+ * 
+ * For a session with base row R (from prompt node's rowIndex):
+ * - Main branch (B0) is at row R
+ * - Non-main branches (B1, B2, ...) are at rows R+1, R+2, ...
+ * 
+ * @param branchId - Branch ID (unique format like "sess_xxx_B0" or backend format like "B0")
  * @param branches - Array of all branches in the graph session
- * @returns Row index (0 for main branch, 1+ for others)
+ * @param sessionBaseRow - Optional base row for the session (from prompt node's rowIndex)
+ * @returns Row index
  */
 export const getBranchRowIndex = (
   branchId: string,
-  branches: Branch[]
+  branches: Branch[],
+  sessionBaseRow?: number
 ): number => {
-  // Extract backend branch ID if in unique format
+  // Extract backend branch ID from unique format
   const backendBranchId = extractBackendBranchId(branchId);
   
-  // Check if this is a main branch (B0)
-  if (backendBranchId === "B0") {
-    // For parallel sessions, each session's B0 should be on a different row
-    // Find the branch and use its index among all main branches
-    const branch = branches.find((b) => b.id === branchId);
-    if (branch) {
+  // Find the branch to get its session ID
+  const branch = branches.find((b) => b.id === branchId);
+  const backendSessionId = branch?.backendSessionId;
+  
+  // Determine the base row for this session
+  // If sessionBaseRow is provided, use it; otherwise, calculate from branches
+  let baseRow = sessionBaseRow ?? 0;
+  
+  if (sessionBaseRow === undefined && backendSessionId) {
+    // Find the main branch (B0) for this session to get its base row
+    const sessionMainBranch = branches.find(
+      (b) => b.backendSessionId === backendSessionId && extractBackendBranchId(b.id) === "B0"
+    );
+    if (sessionMainBranch) {
+      // Count how many sessions' main branches come before this one
       const mainBranches = branches.filter((b) => extractBackendBranchId(b.id) === "B0");
-      const mainIndex = mainBranches.findIndex((b) => b.id === branchId);
-      return mainIndex >= 0 ? mainIndex : 0;
+      const mainIndex = mainBranches.findIndex((b) => b.id === sessionMainBranch.id);
+      baseRow = mainIndex >= 0 ? mainIndex : 0;
     }
-    return 0;
+  }
+  
+  // If this is the main branch (B0), return the base row
+  if (backendBranchId === "B0") {
+    return baseRow;
   }
 
-  // Extract branch number from backend ID (e.g., "B1" -> 1, "B2" -> 2)
-  const getBranchNumber = (id: string): number => {
-    const backendId = extractBackendBranchId(id);
-    const match = backendId.match(/^B(\d+)$/);
-    return match ? parseInt(match[1], 10) : 0;
-  };
+  // For non-main branches, calculate offset within THIS session only
+  // Get all non-main branches for this session
+  const sessionNonMainBranches = branches
+    .filter((b) => {
+      if (extractBackendBranchId(b.id) === "B0") return false;
+      // Only include branches from the same session
+      return b.backendSessionId === backendSessionId;
+    })
+    .sort((a, b) => {
+      // Sort by branch number (B1, B2, B3...)
+      const getNum = (id: string): number => {
+        const backendId = extractBackendBranchId(id);
+        const match = backendId.match(/^B(\d+)$/);
+        return match ? parseInt(match[1], 10) : 0;
+      };
+      return getNum(a.id) - getNum(b.id);
+    });
 
-  // Count main branches (B0s) to offset non-main branches
-  const mainBranchCount = branches.filter((b) => extractBackendBranchId(b.id) === "B0").length;
+  // Find the index of the target branch within this session's non-main branches
+  const index = sessionNonMainBranches.findIndex((b) => b.id === branchId);
+  
+  // Return base row + 1 (for main branch) + index within session's non-main branches
+  return baseRow + 1 + (index >= 0 ? index : 0);
+};
 
-  // Get all non-main branches and sort by their ID number
-  const nonMainBranches = branches
-    .filter((b) => extractBackendBranchId(b.id) !== "B0")
-    .sort((a, b) => getBranchNumber(a.id) - getBranchNumber(b.id));
-
-  // Find the index of the target branch in the sorted array
-  const index = nonMainBranches.findIndex((b) => b.id === branchId);
-  return index >= 0 ? mainBranchCount + index : mainBranchCount; // Offset by main branch count
+/**
+ * Helper to get the session base row from nodes (prompt node's rowIndex)
+ * @param backendSessionId - The backend session ID
+ * @param nodes - Array of all nodes in the graph session
+ * @returns The base row for the session, or undefined if not found
+ */
+export const getSessionBaseRow = (
+  backendSessionId: string | undefined,
+  nodes: GraphNode[]
+): number | undefined => {
+  if (!backendSessionId) return undefined;
+  
+  const promptNode = nodes.find(
+    (n) => n.type === "prompt" && n.data?.backendSessionId === backendSessionId
+  );
+  
+  if (promptNode?.data?.rowIndex !== undefined) {
+    return promptNode.data.rowIndex as number;
+  }
+  
+  return undefined;
 };
 
 export interface ImageStep {
@@ -477,8 +525,18 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       nodeId = `node_merged_${uniqueBranchId}_${step}_${Date.now()}`;
     }
     
-    // Find PARENT nodes of the source nodes (previous step nodes)
-    // This creates a proper merge visualization from the previous steps
+    // Find the source nodes to determine which has the larger step
+    const node1 = state.currentGraphSession.nodes.find((n) => n.id === sourceNodeId1);
+    const node2 = state.currentGraphSession.nodes.find((n) => n.id === sourceNodeId2);
+    const step1 = node1?.data?.step ?? 0;
+    const step2 = node2?.data?.step ?? 0;
+    
+    // The source node for the merged branch should be the one with the larger step
+    // This ensures the merged branch's first node is positioned at the same column as that node
+    const primarySourceNodeId = step1 >= step2 ? sourceNodeId1 : sourceNodeId2;
+    const secondarySourceNodeId = step1 >= step2 ? sourceNodeId2 : sourceNodeId1;
+    
+    // Find PARENT nodes of the source nodes (for edge connections)
     const sourceEdge1 = state.currentGraphSession.edges.find(
       (e) => e.target === sourceNodeId1
     );
@@ -486,19 +544,22 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       (e) => e.target === sourceNodeId2
     );
     
-    // Use parent nodes if found, otherwise fallback to source nodes
+    // Use parent nodes for edge connections
     const parentNodeId1 = sourceEdge1 ? sourceEdge1.source : sourceNodeId1;
     const parentNodeId2 = sourceEdge2 ? sourceEdge2.source : sourceNodeId2;
     
-    // Create the new branch with unique ID (use first parent as the primary sourceNodeId)
+    // Create the new branch with unique ID
+    // sourceNodeId is set to the node with the larger step for correct column positioning
     const newBranch: Branch = {
       id: uniqueBranchId,
       backendBranchId,
       backendSessionId,
-      sourceNodeId: parentNodeId1,
+      sourceNodeId: primarySourceNodeId, // Use the node with larger step for column calculation
       feedback: [],
       nodes: [nodeId], // Include the new node
     };
+    
+    console.log(`[ImageStore] Merge: primarySource=${primarySourceNodeId}@${Math.max(step1, step2)}, secondarySource=${secondarySourceNodeId}@${Math.min(step1, step2)}`);
 
     // Create the new node with merge metadata
     const newNode: GraphNode = {
@@ -1783,23 +1844,57 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     }
 
     // Find loading node with same step AND same unique branch ID
-    const loadingNode = state.currentGraphSession.nodes.find(
+    let loadingNode = state.currentGraphSession.nodes.find(
       (n) => n.type === "loading" && 
              n.data?.step === step &&
              n.data?.uniqueBranchId === uniqueBranchId
     );
-    if (loadingNode) {
-      console.log(
-        `[ImageStore] Loading 노드를 이미지 노드로 교체 (step=${step}, branch=${uniqueBranchId}): ${loadingNode.id} -> ${finalNodeId}`
+    
+    // Fallback: If no exact match, find any loading node in the same branch
+    // This handles cases where step numbers might not match exactly (e.g., after backtracking)
+    if (!loadingNode && uniqueBranchId) {
+      loadingNode = state.currentGraphSession.nodes.find(
+        (n) => n.type === "loading" && 
+               n.data?.uniqueBranchId === uniqueBranchId
       );
+      if (loadingNode) {
+        console.log(
+          `[ImageStore] Found loading node with branch match only (loadingStep=${loadingNode.data?.step}, imageStep=${step}, branch=${uniqueBranchId})`
+        );
+      }
+    }
+    
+    // Second fallback: Find loading node by backendBranchId if uniqueBranchId doesn't match
+    if (!loadingNode && backendBranchId) {
+      loadingNode = state.currentGraphSession.nodes.find(
+        (n) => n.type === "loading" && 
+               n.data?.backendBranchId === backendBranchId
+      );
+      if (loadingNode) {
+        console.log(
+          `[ImageStore] Found loading node with backendBranchId match only (loadingStep=${loadingNode.data?.step}, imageStep=${step}, backendBranch=${backendBranchId})`
+        );
+      }
+    }
+    
+    if (loadingNode) {
+      const loadingNodeStep = loadingNode.data?.step;
+      console.log(
+        `[ImageStore] Loading 노드를 이미지 노드로 교체 (loadingStep=${loadingNodeStep}, imageStep=${step}, branch=${uniqueBranchId}): ${loadingNode.id} -> ${finalNodeId}`
+      );
+      
       // Loading node를 image node로 교체
+      // Use the new position if the step changed, otherwise keep the loading node's position
+      const finalPosition = loadingNodeStep !== step ? position : loadingNode.position;
+      
       const updatedNodes: GraphNode[] = state.currentGraphSession.nodes.map((n) =>
         n.id === loadingNode.id
           ? {
               ...n,
               id: finalNodeId,
               type: "image" as const,
-              data: { ...n.data, imageUrl, backendBranchId, backendSessionId, uniqueBranchId },
+              position: finalPosition, // Use calculated position
+              data: { ...n.data, imageUrl, backendBranchId, backendSessionId, uniqueBranchId, step }, // Update step to actual step
             }
           : n
       );
@@ -2001,17 +2096,18 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
 
     const nodeId = `node_loading_${backendSessionId || sessionId}_${step}_${Date.now()}`;
 
-    // Calculate position using unified getBranchRowIndex
+    // Calculate position using unified getBranchRowIndex with session base row
+    const sessionBaseRow = getSessionBaseRow(backendSessionId, state.currentGraphSession.nodes);
+    const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches, sessionBaseRow);
+    
     let finalPosition: { x: number; y: number };
     if (position) {
       // If position is provided, use it but recalculate y based on rowIndex for consistency
-      const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches);
       finalPosition = {
         x: position.x,
         y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
       };
     } else {
-      const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches);
       finalPosition = {
         x: GRID_START_X + step * GRID_CELL_WIDTH,
         y: GRID_START_Y + rowIndex * GRID_CELL_HEIGHT,
@@ -2211,10 +2307,11 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return finalNodeId;
     }
 
-    // Calculate position using unified getBranchRowIndex
-    // Always recalculate y based on rowIndex for consistency, even if position is provided
+    // Calculate position using unified getBranchRowIndex with session base row
+    const sessionBaseRow = getSessionBaseRow(backendSessionId, state.currentGraphSession.nodes);
+    const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches, sessionBaseRow);
+    
     let finalPosition: { x: number; y: number };
-    const rowIndex = getBranchRowIndex(uniqueBranchId, state.currentGraphSession.branches);
     if (position) {
       // If position is provided, use x from position but recalculate y based on rowIndex
       finalPosition = {
@@ -2642,10 +2739,26 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     );
     
     // Update branches to remove references to deleted nodes
-    const newBranches = branches.map((branch) => ({
+    let updatedBranches = branches.map((branch) => ({
       ...branch,
       nodes: branch.nodes.filter((nid) => !nodesToRemove.has(nid)),
     }));
+    
+    // Find branches that are now empty (have no nodes) and are not main branches (B0)
+    // Main branches should be kept even if empty (they represent the session's main path)
+    const branchesToRemove = updatedBranches.filter((branch) => {
+      const backendBranchId = extractBackendBranchId(branch.id);
+      // Keep main branches (B0) even if empty
+      if (backendBranchId === "B0") return false;
+      // Remove non-main branches that have no nodes
+      return branch.nodes.length === 0;
+    });
+    
+    if (branchesToRemove.length > 0) {
+      console.log(`[ImageStore] Removing empty branches: ${branchesToRemove.map(b => b.id).join(", ")}`);
+      const branchIdsToRemove = new Set(branchesToRemove.map(b => b.id));
+      updatedBranches = updatedBranches.filter(b => !branchIdsToRemove.has(b.id));
+    }
     
     // Clear selection if the selected node was removed
     const newSelectedNodeId = nodesToRemove.has(state.selectedNodeId || "")
@@ -2657,12 +2770,14 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         ...state.currentGraphSession,
         nodes: newNodes,
         edges: newEdges,
-        branches: newBranches,
+        branches: updatedBranches,
       },
       selectedNodeId: newSelectedNodeId,
     });
     
-    console.log(`[ImageStore] Removed ${nodesToRemove.size} nodes, ${nodes.length - newNodes.length} remaining`);
+    // Note: Node repositioning is handled by GraphCanvas's nodes memo
+    // which recalculates positions based on the updated branches array
+    console.log(`[ImageStore] Removed ${nodesToRemove.size} nodes, ${branchesToRemove.length} branches. Remaining: ${newNodes.length} nodes, ${updatedBranches.length} branches`);
   },
 
   // Register a parallel session for a prompt node

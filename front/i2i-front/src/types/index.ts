@@ -39,6 +39,7 @@ export interface FeedbackRecord {
   bbox?: { x: number; y: number; width: number; height: number };
   bboxId?: string; // BBOX의 경우 ID
   timestamp: number;
+  guidanceScale?: number; // Guidance scale for text or style guidance
 }
 
 // 객체 및 구도 설정 관련 타입

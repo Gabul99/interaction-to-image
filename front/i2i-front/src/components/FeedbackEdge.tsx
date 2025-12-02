@@ -1,5 +1,4 @@
 import React, { useState, useMemo } from "react";
-import { createPortal } from "react-dom";
 import { useReactFlow } from "reactflow";
 import { getBezierPath, BaseEdge, EdgeLabelRenderer, type Position } from "reactflow";
 import styled from "styled-components";
@@ -10,48 +9,12 @@ const EdgeContainer = styled.g`
   cursor: pointer;
 `;
 
-const Tooltip = styled.div<{ x: number; y: number; visible: boolean }>`
-  position: fixed;
-  left: ${(props) => props.x}px;
-  top: ${(props) => props.y}px;
-  background: rgba(26, 26, 46, 0.95);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  padding: 12px;
-  min-width: 200px;
-  max-width: 300px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-  z-index: 9999;
-  pointer-events: none;
-  opacity: ${(props) => (props.visible ? 1 : 0)};
-  transition: opacity 0.2s ease;
-  transform: translate(-50%, -100%) translateY(-8px);
-`;
-
-const TooltipTitle = styled.div`
-  color: #f9fafb;
-  font-size: 12px;
-  font-weight: 600;
-  margin-bottom: 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  padding-bottom: 8px;
-`;
-
-const FeedbackItem = styled.div`
-  margin-bottom: 8px;
-  padding: 8px;
-  background: rgba(55, 65, 81, 0.5);
-  border-radius: 4px;
-`;
-
 const FeedbackAreaBadge = styled.span<{ area: string }>`
   display: inline-block;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 8px;
   font-weight: 600;
-  margin-right: 6px;
   background: ${(props) => {
     if (props.area === "full") return "rgba(99, 102, 241, 0.2)";
     if (props.area === "bbox") return "rgba(139, 92, 246, 0.2)";
@@ -64,37 +27,88 @@ const FeedbackAreaBadge = styled.span<{ area: string }>`
   }};
 `;
 
-const FeedbackText = styled.div`
-  color: #d1d5db;
-  font-size: 11px;
-  margin-top: 4px;
-  word-wrap: break-word;
-`;
-
-const EdgeLabel = styled.div`
+const EdgeLabel = styled.div<{ $isHovered?: boolean; $borderColor?: string }>`
   background: rgba(26, 26, 46, 0.95);
-  backdrop-filter: blur(10px);
-  border: 2px solid rgba(139, 92, 246, 0.6);
+  backdrop-filter: blur(8px);
+  border: 2px solid ${(props) => props.$borderColor || "#8b5cf6"};
   border-radius: 8px;
   padding: 6px 10px;
-  font-size: 11px;
-  color: #8b5cf6;
-  font-weight: 600;
+  font-size: 10px;
+  color: #f9fafb;
   pointer-events: all;
   cursor: pointer;
   transition: all 0.2s ease;
-  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+  box-shadow: ${(props) => props.$isHovered 
+    ? `0 4px 12px ${props.$borderColor || "rgba(139, 92, 246, 0.5)"}60` 
+    : "0 2px 8px rgba(0, 0, 0, 0.3)"};
   display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 100px;
+  max-width: 180px;
+  transform: ${(props) => props.$isHovered ? "scale(1.02)" : "scale(1)"};
 
   &:hover {
     background: rgba(26, 26, 46, 1);
-    border-color: #8b5cf6;
-    transform: scale(1.05);
-    box-shadow: 0 6px 16px rgba(139, 92, 246, 0.4);
+    transform: scale(1.02);
   }
+`;
+
+const EdgeLabelHeader = styled.div<{ $color?: string }>`
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: ${(props) => props.$color || "#8b5cf6"};
+  font-weight: 600;
+  font-size: 10px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid ${(props) => props.$color ? `${props.$color}40` : "rgba(139, 92, 246, 0.3)"};
+`;
+
+const FeedbackItem = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+  background: rgba(55, 65, 81, 0.4);
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+`;
+
+const FeedbackItemHeader = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+`;
+
+const GuidanceScaleBadge = styled.span`
+  display: inline-block;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 8px;
+  font-weight: 600;
+  background: rgba(99, 102, 241, 0.2);
+  color: #6366f1;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+`;
+
+const FeedbackTextContent = styled.div`
+  color: #d1d5db;
+  font-size: 9px;
+  line-height: 1.3;
+  word-break: break-word;
+  max-height: 32px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+`;
+
+const ImageIndicator = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: #8b5cf6;
+  font-size: 9px;
 `;
 
 interface FeedbackEdgeData {
@@ -128,7 +142,6 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
   markerEnd,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
-  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
   const { getEdges } = useReactFlow();
   const { currentGraphSession } = useImageStore();
 
@@ -141,15 +154,8 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
     targetPosition,
   });
 
-  const handleMouseEnter = (e: React.MouseEvent) => {
+  const handleMouseEnter = () => {
     setIsHovered(true);
-    setTooltipPosition({ x: e.clientX, y: e.clientY });
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (isHovered) {
-      setTooltipPosition({ x: e.clientX, y: e.clientY });
-    }
   };
 
   const handleMouseLeave = () => {
@@ -159,6 +165,9 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
   const feedbacks = data?.feedback || [];
   const branchId = data?.branchId;
   const isBranchEdge = branchId && branchId !== "B0";
+  
+  // Get edge color from style prop (set by GraphCanvas based on branch)
+  const edgeColor = style?.stroke as string || "#8b5cf6";
   
   // Check if this is the first edge of the branch (the edge that forks from the main branch)
   const isFirstBranchEdge = useMemo(() => {
@@ -206,47 +215,10 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
     if (area === "point") return "포인팅";
     return area;
   };
-  
-  const getTypeLabel = (type: string) => {
-    if (type === "text") return "텍스트";
-    if (type === "image") return "이미지";
-    return type;
-  };
 
   // Edge 중간 지점 계산 (라벨 위치)
   const labelX = (sourceX + targetX) / 2;
   const labelY = (sourceY + targetY) / 2;
-
-  // 피드백 요약 텍스트 생성 - 피드백 종류와 개수 표시
-  const getFeedbackSummary = () => {
-    if (feedbacks.length === 0) return "";
-    
-    const areaCounts = {
-      full: feedbacks.filter(f => f.area === "full").length,
-      bbox: feedbacks.filter(f => f.area === "bbox").length,
-      point: feedbacks.filter(f => f.area === "point").length,
-      sketch: feedbacks.filter(f => f.area === "sketch").length,
-    };
-    
-    const typeCounts = {
-      text: feedbacks.filter(f => f.type === "text" && f.text).length,
-      image: feedbacks.filter(f => f.type === "image" && f.imageUrl).length,
-    };
-    
-    const parts: string[] = [];
-    
-    // Area 정보
-    if (areaCounts.full > 0) parts.push(`전체`);
-    if (areaCounts.bbox > 0) parts.push(`BBOX`);
-    if (areaCounts.point > 0) parts.push(`포인팅`);
-    if (areaCounts.sketch > 0) parts.push(`스케치`);
-    
-    // Type 정보
-    if (typeCounts.text > 0) parts.push(`텍스트`);
-    if (typeCounts.image > 0) parts.push(`이미지`);
-    
-    return parts.length > 0 ? parts.join(" · ") : "피드백";
-  };
   
   // 피드백 아이콘 생성
   const getFeedbackIcon = () => {
@@ -262,7 +234,6 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
     <>
       <EdgeContainer
         onMouseEnter={handleMouseEnter}
-        onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
       >
         <BaseEdge
@@ -276,64 +247,47 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
         <>
           <EdgeLabelRenderer>
             <EdgeLabel
+              $isHovered={isHovered}
+              $borderColor={edgeColor}
               style={{
                 position: "absolute",
                 transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
                 pointerEvents: "all",
               }}
               onMouseEnter={handleMouseEnter}
-              onMouseMove={handleMouseMove}
               onMouseLeave={handleMouseLeave}
             >
-              <span>{getFeedbackIcon()}</span>
-              <span>{getFeedbackSummary()}</span>
+              <EdgeLabelHeader $color={edgeColor}>
+                <span>{getFeedbackIcon()}</span>
+                <span>피드백 ({feedbacks.length})</span>
+              </EdgeLabelHeader>
+              {feedbacks.map((feedback, index) => (
+                <FeedbackItem key={feedback.id || index}>
+                  <FeedbackItemHeader>
+                    <FeedbackAreaBadge area={feedback.area}>
+                      {getAreaLabel(feedback.area)}
+                    </FeedbackAreaBadge>
+                    <GuidanceScaleBadge>
+                      {feedback.type === "text" ? "T" : "S"}: {feedback.guidanceScale?.toFixed(1) ?? (feedback.type === "image" ? "5.0" : "2.0")}
+                    </GuidanceScaleBadge>
+                  </FeedbackItemHeader>
+                  {feedback.text && (
+                    <FeedbackTextContent>
+                      {feedback.text.length > 60 ? feedback.text.substring(0, 60) + "..." : feedback.text}
+                    </FeedbackTextContent>
+                  )}
+                  {feedback.imageUrl && (
+                    <ImageIndicator>
+                      <span>🖼️</span>
+                      <span>참조 이미지</span>
+                    </ImageIndicator>
+                  )}
+                </FeedbackItem>
+              ))}
             </EdgeLabel>
           </EdgeLabelRenderer>
         </>
       )}
-      {/* 피드백이 있는 경우에만 tooltip 표시 - Portal로 body에 렌더링 */}
-      {hasFeedback &&
-        typeof document !== "undefined" &&
-        createPortal(
-          <Tooltip
-            x={tooltipPosition.x}
-            y={tooltipPosition.y}
-            visible={isHovered}
-          >
-            <TooltipTitle>피드백 정보 ({feedbacks.length}개)</TooltipTitle>
-            {feedbacks.map((feedback, index) => (
-              <FeedbackItem key={feedback.id || index}>
-                <div style={{ display: "flex", gap: "6px", alignItems: "center", marginBottom: "4px" }}>
-                  <FeedbackAreaBadge area={feedback.area}>
-                    {getAreaLabel(feedback.area)}
-                  </FeedbackAreaBadge>
-                  <span style={{ 
-                    fontSize: "10px", 
-                    color: "#9ca3af",
-                    padding: "2px 6px",
-                    background: "rgba(99, 102, 241, 0.2)",
-                    borderRadius: "4px"
-                  }}>
-                    {getTypeLabel(feedback.type)}
-                  </span>
-                </div>
-                {feedback.text && (
-                  <FeedbackText>{feedback.text}</FeedbackText>
-                )}
-                {feedback.imageUrl && (
-                  <FeedbackText style={{ color: "#8b5cf6" }}>🖼️ 참조 이미지</FeedbackText>
-                )}
-                {feedback.bbox && (
-                  <FeedbackText style={{ fontSize: "10px", color: "#6b7280" }}>
-                    영역: ({feedback.bbox.x.toFixed(2)}, {feedback.bbox.y.toFixed(2)}) 
-                    {feedback.bbox.width.toFixed(2)} × {feedback.bbox.height.toFixed(2)}
-                  </FeedbackText>
-                )}
-              </FeedbackItem>
-            ))}
-          </Tooltip>,
-          document.body
-        )}
     </>
   );
 };

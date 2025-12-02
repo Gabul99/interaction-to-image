@@ -465,6 +465,73 @@ const InstructionText = styled.div`
   border: 1px solid rgba(99, 102, 241, 0.2);
 `;
 
+const SliderContainer = styled.div`
+  margin-bottom: 16px;
+`;
+
+const SliderLabel = styled.div`
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  color: #d1d5db;
+  font-size: 13px;
+`;
+
+const SliderValue = styled.span`
+  color: #6366f1;
+  font-weight: 600;
+  min-width: 40px;
+  text-align: right;
+`;
+
+const Slider = styled.input`
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(55, 65, 81, 0.8);
+  outline: none;
+  appearance: none;
+  cursor: pointer;
+
+  &::-webkit-slider-thumb {
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    cursor: pointer;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+    transition: transform 0.15s ease;
+  }
+
+  &::-webkit-slider-thumb:hover {
+    transform: scale(1.1);
+  }
+
+  &::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    cursor: pointer;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  }
+
+  &::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 3px;
+  }
+
+  &::-moz-range-track {
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(55, 65, 81, 0.8);
+  }
+`;
+
 const ImageSection = styled.div`
   display: flex;
   flex-direction: column;
@@ -585,6 +652,10 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   const [selectedBboxIdForFeedback, setSelectedBboxIdForFeedback] = useState<
     string | null
   >(null);
+  
+  // Guidance scale states
+  const [textGuidanceScale, setTextGuidanceScale] = useState(2.0);
+  const [styleGuidanceScale, setStyleGuidanceScale] = useState(5.0);
 
   // 도구 모드
   const [toolMode, setToolMode] = useState<ToolMode>("select");
@@ -677,6 +748,8 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
           ? selectedBboxIdForFeedback || undefined
           : undefined,
       timestamp: Date.now(),
+      // Store guidance scale with the feedback
+      guidanceScale: hasImage ? styleGuidanceScale : textGuidanceScale,
     };
 
     addFeedbackToCurrentList(feedback);
@@ -778,7 +851,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
             branch_id: newBranchId,
             intervene_choice: "Text Guidance",
             text_input: feedback.text,
-            text_scale: 2.0,
+            text_scale: feedback.guidanceScale ?? 2.0,
             text_region: textRegion,
           });
         } else if (feedback.type === "image" && feedback.imageUrl) {
@@ -803,7 +876,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
               session_id: sessionId,
               branch_id: newBranchId,
               intervene_choice: "Style Guidance",
-              style_scale: 5.0,
+              style_scale: feedback.guidanceScale ?? 5.0,
               style_region: styleRegion,
               style_file: file,
             });
@@ -829,11 +902,17 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
       // Don't pass position - let addImageNodeToBranch calculate it using grid layout
       // This ensures the node is placed at the correct rowIndex (y coordinate)
       // Use the unique branch ID for adding nodes
-      useImageStore
+      const newNodeId = useImageStore
         .getState()
         .addImageNodeToBranch(graphSessionId, uniqueBranchId, imageUrl, stepIdx, undefined);
       // Set backend active branch to the new one
       useImageStore.getState().setBackendSessionMeta(sessionId, newBranchId);
+      
+      // Select the newly created node
+      if (newNodeId) {
+        useImageStore.getState().selectNode(newNodeId);
+      }
+      
       clearCurrentFeedbackList();
       onClose();
     } catch (error) {
@@ -1163,11 +1242,27 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                         </OptionGroup>
 
                         {selectedType === "text" && (
-                          <TextArea
-                            placeholder="피드백을 입력하세요..."
-                            value={text}
-                            onChange={(e) => setText(e.target.value)}
-                          />
+                          <>
+                            <TextArea
+                              placeholder="피드백을 입력하세요..."
+                              value={text}
+                              onChange={(e) => setText(e.target.value)}
+                            />
+                            <SliderContainer>
+                              <SliderLabel>
+                                <span>Text Guidance Scale</span>
+                                <SliderValue>{textGuidanceScale.toFixed(1)}</SliderValue>
+                              </SliderLabel>
+                              <Slider
+                                type="range"
+                                min="0"
+                                max="10"
+                                step="0.1"
+                                value={textGuidanceScale}
+                                onChange={(e) => setTextGuidanceScale(parseFloat(e.target.value))}
+                              />
+                            </SliderContainer>
+                          </>
                         )}
 
                         {selectedType === "image" && (
@@ -1193,6 +1288,20 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                                 </RemoveImageButton>
                               </ImagePreview>
                             )}
+                            <SliderContainer>
+                              <SliderLabel>
+                                <span>Style Guidance Scale</span>
+                                <SliderValue>{styleGuidanceScale.toFixed(1)}</SliderValue>
+                              </SliderLabel>
+                              <Slider
+                                type="range"
+                                min="0"
+                                max="20"
+                                step="0.1"
+                                value={styleGuidanceScale}
+                                onChange={(e) => setStyleGuidanceScale(parseFloat(e.target.value))}
+                              />
+                            </SliderContainer>
                           </>
                         )}
 
@@ -1229,6 +1338,16 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                               <FeedbackAreaBadge area={feedback.area}>
                                 {getAreaLabel(feedback.area)}
                               </FeedbackAreaBadge>
+                              <span style={{ 
+                                fontSize: "11px", 
+                                color: "#6366f1",
+                                background: "rgba(99, 102, 241, 0.15)",
+                                padding: "2px 6px",
+                                borderRadius: "4px",
+                                fontWeight: 500
+                              }}>
+                                {feedback.type === "image" ? "Style" : "Text"} Scale: {feedback.guidanceScale?.toFixed(1) ?? (feedback.type === "image" ? "5.0" : "2.0")}
+                              </span>
                             </FeedbackItemInfo>
                             <DeleteButton
                               onClick={() => handleDeleteFeedback(feedback.id)}
