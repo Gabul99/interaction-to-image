@@ -675,7 +675,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   // Get branch row index using unified function from imageStore
   const getBranchRowIndexLocal = useCallback((branchId: string): number => {
     if (!currentGraphSession) return 0;
-    return getBranchRowIndex(branchId, currentGraphSession.branches);
+    return getBranchRowIndex(branchId, currentGraphSession.branches, currentGraphSession.nodes);
   }, [currentGraphSession]);
 
   // React-flow의 nodes와 edges를 store의 데이터와 동기화
