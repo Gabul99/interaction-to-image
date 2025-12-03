@@ -112,7 +112,12 @@ const SimplePromptNode: React.FC<SimplePromptNodeProps> = ({
 }) => {
   return (
     <>
-      <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
+      {/* Visible target handle on the left for incoming connections (image ➝ prompt) */}
+      <Handle
+        type="target"
+        position={Position.Left}
+        style={{ background: "#6366f1" }}
+      />
       <NodeContainer selected={selected ?? false}>
         <NodeLabel>Prompt</NodeLabel>
         <PromptInput
@@ -139,6 +144,7 @@ const SimplePromptNode: React.FC<SimplePromptNodeProps> = ({
           )}
         </ImageRow>
       </NodeContainer>
+      {/* Visible source handle on the right: generated images connect here */}
       <Handle
         type="source"
         position={Position.Right}

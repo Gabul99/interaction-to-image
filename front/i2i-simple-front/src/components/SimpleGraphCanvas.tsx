@@ -14,6 +14,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import styled from "styled-components";
 import ImageNode from "./ImageNode";
+import LoadingNode from "./LoadingNode";
 import SimplePromptNode, { type SimplePromptNodeData } from "./SimplePromptNode";
 import {
   generateSimpleImages,
@@ -91,11 +92,13 @@ const HelperText = styled.div`
 
 type SimpleNodeData =
   | SimplePromptNodeData
-  | { imageUrl?: string; step?: number; parentPromptId?: string };
+  | { imageUrl?: string; step?: number; parentPromptId?: string }
+  | { step?: number; parentPromptId?: string }; // loading node
 
 const nodeTypes: NodeTypes = {
   prompt: SimplePromptNode,
   image: ImageNode,
+  loading: LoadingNode,
 };
 
 const SimpleGraphCanvas: React.FC = () => {
@@ -106,6 +109,7 @@ const SimpleGraphCanvas: React.FC = () => {
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [activePromptId, setActivePromptId] = useState<string | null>(null);
   const [nextPromptIndex, setNextPromptIndex] = useState(1);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const draggingPromptRef = useRef<{
     id: string;
     startPosition: { x: number; y: number };
@@ -258,22 +262,69 @@ const SimpleGraphCanvas: React.FC = () => {
       }
     }
 
+    const baseX = promptNode.position.x;
+    const baseY = promptNode.position.y;
+    const offsetX = 320;
+    const verticalSpacing = 240; // more vertical space between branched images
+    const startY = baseY - verticalSpacing * 1.5;
+
+    const loadingNodeIds = Array.from({ length: 4 }, (_, index) => {
+      return `${activePromptId}-loading-${index + 1}`;
+    });
+
+    // Place four loading nodes where the images will appear
+    setNodes((prev) => {
+      const filtered = prev.filter(
+        (node) =>
+          !(
+            node.type === "loading" &&
+            (node.data as { parentPromptId?: string }).parentPromptId ===
+              activePromptId
+          )
+      );
+
+      const loadingNodes: Node<SimpleNodeData>[] = loadingNodeIds.map(
+        (id, index) => {
+          const y = startY + index * verticalSpacing;
+          return {
+            id,
+            type: "loading",
+            position: { x: baseX + offsetX, y },
+            data: {
+              step: undefined,
+              parentPromptId: activePromptId || undefined,
+            },
+          };
+        }
+      );
+
+      return [...filtered, ...loadingNodes];
+    });
+
+    setEdges((prev) => {
+      // Remove previous prompt->image edges; keep other graph edges
+      const filtered = prev.filter(
+        (edge) => edge.source !== activePromptId
+      );
+      const loadingEdges: Edge[] = loadingNodeIds.map((id, index) => ({
+        id: `e-${activePromptId}-loading-${index + 1}`,
+        source: activePromptId as string,
+        target: id,
+      }));
+      return [...filtered, ...loadingEdges];
+    });
+
     setIsGenerating(true);
     setError(null);
 
     const applyImages = (res: SimpleGenerateResponse) => {
-      const baseX = promptNode.position.x;
-      const baseY = promptNode.position.y;
-      const offsetX = 320;
-      const verticalSpacing = 220;
-      const startY = baseY - verticalSpacing * 1.5;
 
       setNodes((prev) => {
         // Remove existing images for this prompt
         const filtered = prev.filter(
           (node) =>
             !(
-              node.type === "image" &&
+              (node.type === "image" || node.type === "loading") &&
               (node.data as { parentPromptId?: string }).parentPromptId ===
                 activePromptId
             )
@@ -336,6 +387,17 @@ const SimpleGraphCanvas: React.FC = () => {
       applyImages(res);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      // Remove loading nodes on error
+      setNodes((prev) =>
+        prev.filter(
+          (n) =>
+            !(
+              n.type === "loading" &&
+              (n.data as { parentPromptId?: string }).parentPromptId ===
+                activePromptId
+            )
+        )
+      );
       // eslint-disable-next-line no-console
       console.error("[SimpleGraphCanvas] generate failed:", e);
     } finally {
@@ -346,7 +408,8 @@ const SimpleGraphCanvas: React.FC = () => {
   const handleAddPrompt = useCallback(() => {
     const id = `prompt-${nextPromptIndex}`;
     const promptCount = nodes.filter((n) => n.type === "prompt").length;
-    const position = { x: 0, y: promptCount * 260 };
+    // Place input nodes horizontally across instead of vertically
+    const position = { x: promptCount * 360, y: 0 };
     const newNode = createPromptNode(id, position);
 
     setNodes((prev) => [...prev, newNode]);
@@ -463,9 +526,7 @@ const SimpleGraphCanvas: React.FC = () => {
           return prev;
         }
         const newEdge: Edge = {
-          id:
-            connection.id ??
-            `e-${sourceNode.id}-${targetNode.id}-${Date.now()}`,
+          id: `e-${sourceNode.id}-${targetNode.id}-${Date.now()}`,
           source: sourceNode.id,
           target: targetNode.id,
         };
@@ -474,6 +535,89 @@ const SimpleGraphCanvas: React.FC = () => {
     },
     [nodes, setNodes, setEdges]
   );
+
+  const handleNodeClick = useCallback(
+    (_event: React.MouseEvent, node: Node) => {
+      setSelectedNodeId(node.id);
+      if (node.type === "prompt") {
+        setActivePromptId(node.id);
+      } else {
+        setActivePromptId(null);
+      }
+    },
+    []
+  );
+
+  const handlePaneClick = useCallback(() => {
+    setSelectedNodeId(null);
+    setActivePromptId(null);
+  }, []);
+
+  const { highlightedNodes, highlightedEdges } = useMemo(() => {
+    if (!selectedNodeId) {
+      return { highlightedNodes: nodes, highlightedEdges: edges };
+    }
+
+    // Walk the ancestor chain from the selected node back to the root
+    const pathNodeIds = new Set<string>();
+    const pathEdgeIds = new Set<string>();
+
+    let currentId: string | null = selectedNodeId;
+    while (currentId) {
+      pathNodeIds.add(currentId);
+      // Find the first incoming edge (treat its source as the parent)
+      const incoming = edges.find((e) => e.target === currentId);
+      if (!incoming) break;
+      pathEdgeIds.add(incoming.id);
+      currentId = incoming.source;
+      if (pathNodeIds.has(currentId)) {
+        // Prevent cycles (shouldn't happen in our tree-like graph)
+        break;
+      }
+    }
+
+    const highlightedNodes = nodes.map((node) =>
+      pathNodeIds.has(node.id)
+        ? {
+            ...node,
+            style: {
+              ...(node.style ?? {}),
+              boxShadow: "0 0 0 3px rgba(99, 102, 241, 0.8)",
+              borderRadius: 16,
+            },
+          }
+        : {
+            ...node,
+            style: {
+              ...(node.style ?? {}),
+              boxShadow: undefined,
+            },
+          }
+    );
+
+    const highlightedEdges = edges.map((edge) =>
+      pathEdgeIds.has(edge.id)
+        ? {
+            ...edge,
+            animated: true,
+            style: {
+              ...(edge.style ?? {}),
+              stroke: "#6366f1",
+              strokeWidth: 3,
+            },
+          }
+        : {
+            ...edge,
+            animated: false,
+            style: {
+              ...(edge.style ?? {}),
+              strokeWidth: 1,
+            },
+          }
+    );
+
+    return { highlightedNodes, highlightedEdges };
+  }, [nodes, edges, selectedNodeId]);
 
   return (
     <ReactFlowProvider>
@@ -496,8 +640,8 @@ const SimpleGraphCanvas: React.FC = () => {
         </BottomCenterControls>
 
         <ReactFlow
-          nodes={nodes}
-          edges={edges}
+          nodes={highlightedNodes}
+          edges={highlightedEdges}
           nodeTypes={nodeTypes}
           fitView
           // Allow connecting image nodes into prompt nodes
@@ -508,6 +652,8 @@ const SimpleGraphCanvas: React.FC = () => {
           onNodeDragStart={handleNodeDragStart}
           onNodeDrag={handleNodeDrag}
           onNodeDragStop={handleNodeDragStop}
+          onNodeClick={handleNodeClick}
+          onPaneClick={handlePaneClick}
           zoomOnScroll
           zoomOnPinch
           panOnScroll
