@@ -10,12 +10,15 @@ import ReactFlow, {
   type NodeTypes,
   useNodesState,
   useEdgesState,
+  useReactFlow,
 } from "reactflow";
 import "reactflow/dist/style.css";
 import styled from "styled-components";
 import SimpleImageNode from "./SimpleImageNode";
 import SimpleLoadingNode from "./SimpleLoadingNode";
 import SimplePromptNode, { type SimplePromptNodeData } from "./SimplePromptNode";
+import BookmarkPanel from "./BookmarkPanel";
+import { useImageStore } from "../stores/imageStore";
 import {
   generateSimpleImages,
   generateWithImage,
@@ -621,14 +624,83 @@ const SimpleGraphCanvas: React.FC = () => {
 
   return (
     <ReactFlowProvider>
-      <CanvasContainer>
-        <HelperText>
-          Type your prompt in any input node, optionally upload or connect an
-          image, then click &ldquo;Generate&rdquo; to create 4 images branching
-          to the right. Drag an image node connection into a new prompt to use
-          it as the next input.
-          {error ? `  •  Error: ${error}` : null}
-        </HelperText>
+      <SimpleGraphCanvasContent
+        nodes={highlightedNodes}
+        edges={highlightedEdges}
+        nodeTypes={nodeTypes}
+        onConnect={handleConnect}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onNodeDragStart={handleNodeDragStart}
+        onNodeDrag={handleNodeDrag}
+        onNodeDragStop={handleNodeDragStop}
+        onNodeClick={handleNodeClick}
+        onPaneClick={handlePaneClick}
+        isGenerating={isGenerating}
+        isGenerateDisabled={isGenerateDisabled}
+        error={error}
+        handleGenerate={handleGenerate}
+        handleAddPrompt={handleAddPrompt}
+      />
+    </ReactFlowProvider>
+  );
+};
+
+// Inner component to use useReactFlow hook
+const SimpleGraphCanvasContent: React.FC<{
+  nodes: Node[];
+  edges: Edge[];
+  nodeTypes: NodeTypes;
+  onConnect: (connection: Connection) => void;
+  onNodesChange: any;
+  onEdgesChange: any;
+  onNodeDragStart: any;
+  onNodeDrag: any;
+  onNodeDragStop: any;
+  onNodeClick: any;
+  onPaneClick: any;
+  isGenerating: boolean;
+  isGenerateDisabled: boolean;
+  error: string | null;
+  handleGenerate: () => void;
+  handleAddPrompt: () => void;
+}> = ({
+  nodes,
+  edges,
+  nodeTypes,
+  onConnect,
+  onNodesChange,
+  onEdgesChange,
+  onNodeDragStart,
+  onNodeDrag,
+  onNodeDragStop,
+  onNodeClick,
+  onPaneClick,
+  isGenerating,
+  isGenerateDisabled,
+  error,
+  handleGenerate,
+  handleAddPrompt,
+}) => {
+  const { setCenter } = useReactFlow();
+  const { selectNode } = useImageStore();
+
+  return (
+    <CanvasContainer>
+      <HelperText>
+        Type your prompt in any input node, optionally upload or connect an
+        image, then click &ldquo;Generate&rdquo; to create 4 images branching
+        to the right. Drag an image node connection into a new prompt to use
+        it as the next input.
+        {error ? `  •  Error: ${error}` : null}
+      </HelperText>
+
+      {/* 북마크 패널 */}
+      <BookmarkPanelWrapper
+        reactFlowNodes={nodes}
+        selectNode={selectNode}
+        nodes={nodes}
+      />
 
         <BottomCenterControls>
           <GenerateButton onClick={handleGenerate} disabled={isGenerateDisabled}>
@@ -639,33 +711,78 @@ const SimpleGraphCanvas: React.FC = () => {
           </GenerateButton>
         </BottomCenterControls>
 
-        <ReactFlow
-          nodes={highlightedNodes}
-          edges={highlightedEdges}
-          nodeTypes={nodeTypes}
-          fitView
-          // Allow connecting image nodes into prompt nodes
-          nodesConnectable
-          onConnect={handleConnect}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onNodeDragStart={handleNodeDragStart}
-          onNodeDrag={handleNodeDrag}
-          onNodeDragStop={handleNodeDragStop}
-          onNodeClick={handleNodeClick}
-          onPaneClick={handlePaneClick}
-          zoomOnScroll
-          zoomOnPinch
-          panOnScroll
-          panOnDrag
-          attributionPosition="bottom-left"
-        >
-          <Background />
-          <Controls />
-          <MiniMap />
-        </ReactFlow>
-      </CanvasContainer>
-    </ReactFlowProvider>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        fitView
+        // Allow connecting image nodes into prompt nodes
+        nodesConnectable
+        onConnect={onConnect}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onNodeDragStart={onNodeDragStart}
+        onNodeDrag={onNodeDrag}
+        onNodeDragStop={onNodeDragStop}
+        onNodeClick={onNodeClick}
+        onPaneClick={onPaneClick}
+        zoomOnScroll
+        zoomOnPinch
+        panOnScroll
+        panOnDrag
+        attributionPosition="bottom-left"
+      >
+        <Background />
+        <Controls />
+        <MiniMap />
+      </ReactFlow>
+    </CanvasContainer>
+  );
+};
+
+// 북마크 패널 래퍼 - useReactFlow를 사용하기 위해 ReactFlowProvider 내부에 있어야 함
+const BookmarkPanelWrapper: React.FC<{
+  reactFlowNodes: Node[];
+  selectNode: (nodeId: string | null) => void;
+  nodes: Node[];
+}> = ({ reactFlowNodes, selectNode, nodes }) => {
+  const { setCenter, getNode } = useReactFlow();
+  
+  return (
+    <BookmarkPanel
+      nodes={nodes}
+      onNodeClick={(nodeId) => {
+        // 노드 선택
+        selectNode(nodeId);
+        
+        // 노드로 이동
+        const node = reactFlowNodes.find((n) => n.id === nodeId);
+        if (node) {
+          // ReactFlow에서 노드의 실제 크기 가져오기
+          const reactFlowNode = getNode(nodeId);
+          let centerX = node.position.x;
+          let centerY = node.position.y;
+          
+          // 노드의 실제 크기를 고려하여 중심점 계산
+          if (reactFlowNode && reactFlowNode.width && reactFlowNode.height) {
+            // 노드의 중심점 = position + (width/2, height/2)
+            centerX = node.position.x + reactFlowNode.width / 2;
+            centerY = node.position.y + reactFlowNode.height / 2;
+          } else {
+            // ReactFlow에서 크기를 가져올 수 없는 경우, 추정값 사용
+            // SimpleImageNode의 경우: min-width 180px, max-width 220px, padding 8px, border 2px
+            // 이미지는 aspect-ratio 1이므로 대략 180-220px 정사각형
+            const estimatedWidth = 200; // 평균값
+            const estimatedHeight = 200; // aspect-ratio 1
+            centerX = node.position.x + estimatedWidth / 2;
+            centerY = node.position.y + estimatedHeight / 2;
+          }
+          
+          // 노드의 중심으로 뷰포트 이동
+          setCenter(centerX, centerY, { zoom: 1.2, duration: 500 });
+        }
+      }}
+    />
   );
 };
 

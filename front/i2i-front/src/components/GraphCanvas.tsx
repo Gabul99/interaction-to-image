@@ -10,6 +10,7 @@ import ReactFlow, {
   type NodeTypes,
   type EdgeTypes,
   ReactFlowProvider,
+  useReactFlow,
 } from "reactflow";
 import "reactflow/dist/style.css";
 import styled, { createGlobalStyle } from "styled-components";
@@ -23,7 +24,54 @@ import PlaceholderNode from "./PlaceholderNode";
 import LoadingNode from "./LoadingNode";
 import BranchingModal from "./BranchingModal";
 import FeedbackEdge from "./FeedbackEdge";
+import BookmarkPanel from "./BookmarkPanel";
 import { stepOnce, mergeBranches, backtrackTo } from "../lib/api";
+
+// 북마크 패널 래퍼 - useReactFlow를 사용하기 위해 ReactFlowProvider 내부에 있어야 함
+const BookmarkPanelWrapper: React.FC<{
+  reactFlowNodes: Node[];
+  selectNode: (nodeId: string | null) => void;
+  nodes?: Node[];
+}> = ({ reactFlowNodes, selectNode, nodes }) => {
+  const { setCenter, getNode } = useReactFlow();
+  
+  return (
+    <BookmarkPanel
+      nodes={nodes}
+      onNodeClick={(nodeId) => {
+        // 노드 선택
+        selectNode(nodeId);
+        
+        // 노드로 이동
+        const node = reactFlowNodes.find((n) => n.id === nodeId);
+        if (node) {
+          // ReactFlow에서 노드의 실제 크기 가져오기
+          const reactFlowNode = getNode(nodeId);
+          let centerX = node.position.x;
+          let centerY = node.position.y;
+          
+          // 노드의 실제 크기를 고려하여 중심점 계산
+          if (reactFlowNode && reactFlowNode.width && reactFlowNode.height) {
+            // 노드의 중심점 = position + (width/2, height/2)
+            centerX = node.position.x + reactFlowNode.width / 2;
+            centerY = node.position.y + reactFlowNode.height / 2;
+          } else {
+            // ReactFlow에서 크기를 가져올 수 없는 경우, 추정값 사용
+            // ImageNode의 경우: min-width 180px, max-width 220px, padding 8px, border 2px
+            // 이미지는 aspect-ratio 1이므로 대략 180-220px 정사각형
+            const estimatedWidth = 200; // 평균값
+            const estimatedHeight = 200; // aspect-ratio 1
+            centerX = node.position.x + estimatedWidth / 2;
+            centerY = node.position.y + estimatedHeight / 2;
+          }
+          
+          // 노드의 중심으로 뷰포트 이동
+          setCenter(centerX, centerY, { zoom: 1.2, duration: 500 });
+        }
+      }}
+    />
+  );
+};
 
 const nodeTypes: NodeTypes = {
   prompt: PromptNode,
@@ -2256,6 +2304,13 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             />
           </SettingsRow>
         </SettingsPanel>
+
+        {/* 북마크 패널 - ReactFlowProvider 내부에 있어야 useReactFlow 사용 가능 */}
+        <BookmarkPanelWrapper
+          reactFlowNodes={reactFlowNodes}
+          selectNode={selectNode}
+          nodes={reactFlowNodes}
+        />
 
         {/* Control buttons at bottom center of canvas */}
         <div

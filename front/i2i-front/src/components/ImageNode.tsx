@@ -2,6 +2,7 @@ import React from "react";
 import { Handle, Position } from "reactflow";
 import styled from "styled-components";
 import { useImageStore } from "../stores/imageStore";
+import { FaBookmark, FaRegBookmark } from "react-icons/fa";
 
 // Outer wrapper - includes hover area for branching button
 const NodeWrapper = styled.div`
@@ -209,6 +210,48 @@ const ArrowIndicator = styled.div<{ color: string }>`
   }
 `;
 
+const BookmarkButton = styled.button<{ $isBookmarked: boolean }>`
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: auto;
+  height: auto;
+  padding: 4px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  z-index: 20;
+
+  svg {
+    width: 24px;
+    height: 24px;
+    color: ${props => props.$isBookmarked 
+      ? '#fbbf24' 
+      : 'rgba(255, 255, 255, 0.6)'};
+    transition: all 0.2s ease;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+  }
+
+  &:hover {
+    svg {
+      color: ${props => props.$isBookmarked 
+        ? '#f59e0b' 
+        : 'rgba(255, 255, 255, 0.9)'};
+      transform: scale(1.15);
+    }
+  }
+
+  &:active {
+    svg {
+      transform: scale(0.95);
+    }
+  }
+`;
+
 interface ImageNodeData {
   imageUrl?: string;
   step?: number;
@@ -228,7 +271,8 @@ interface ImageNodeProps {
 
 const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
   const [imageLoaded, setImageLoaded] = React.useState(false);
-  const { hoveredFeedbackEdge, currentGraphSession } = useImageStore();
+  const [isHovered, setIsHovered] = React.useState(false);
+  const { hoveredFeedbackEdge, currentGraphSession, toggleBookmark, isBookmarked } = useImageStore();
 
   const handleBranchClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -272,8 +316,18 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
     }
   }, [data?.imageUrl, id, data?.step]);
 
+  const bookmarked = isBookmarked(id);
+  
+  const handleBookmarkClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    toggleBookmark(id);
+  };
+
   return (
-    <NodeWrapper>
+    <NodeWrapper
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+    >
       {/* Branching button - positioned in the padding area above the node, shown on hover */}
       <BranchingButton
         className="branching-button"
@@ -330,6 +384,17 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
               color={item.bbox.color}
             />
           ))}
+          
+          {/* 북마크 버튼 - hover 시 표시 */}
+          {isHovered && (
+            <BookmarkButton
+              $isBookmarked={bookmarked}
+              onClick={handleBookmarkClick}
+              title={bookmarked ? "북마크 해제" : "북마크 추가"}
+            >
+              {bookmarked ? <FaBookmark /> : <FaRegBookmark />}
+            </BookmarkButton>
+          )}
         </ImageWrapper>
         <NodeLabel>Step {data?.step !== undefined ? data.step : "?"}</NodeLabel>
         

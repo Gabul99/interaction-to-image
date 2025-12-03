@@ -401,6 +401,11 @@ export interface ImageStreamState {
   
   // Register a parallel session for a prompt node
   registerParallelSession: (promptNodeId: string, backendSessionId: string, backendBranchId: string) => void;
+  
+  // 북마크 관련
+  bookmarkedNodeIds: string[];
+  toggleBookmark: (nodeId: string) => void;
+  isBookmarked: (nodeId: string) => boolean;
 }
 
 export const useImageStore = create<ImageStreamState>((set, get) => ({
@@ -428,6 +433,9 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   
   // Parallel sessions map: promptNodeId -> { backendSessionId, backendBranchId }
   parallelSessions: new Map(),
+  
+  // 북마크 관련 초기 상태
+  bookmarkedNodeIds: [],
   
   setBackendSessionMeta: (sessionId: string, activeBranchId: string) => {
     set({ backendSessionId: sessionId, backendActiveBranchId: activeBranchId });
@@ -2992,5 +3000,27 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
 
     console.log(`[ImageStore] Added new prompt node: ${promptNodeId} with backend session: ${backendSessionId}, branch: ${backendBranchId}, row: ${newRowIndex}`);
     return promptNodeId;
+  },
+  
+  // 북마크 토글
+  toggleBookmark: (nodeId: string) => {
+    const state = get();
+    const isCurrentlyBookmarked = state.bookmarkedNodeIds.includes(nodeId);
+    
+    if (isCurrentlyBookmarked) {
+      set({
+        bookmarkedNodeIds: state.bookmarkedNodeIds.filter((id) => id !== nodeId),
+      });
+    } else {
+      set({
+        bookmarkedNodeIds: [...state.bookmarkedNodeIds, nodeId],
+      });
+    }
+  },
+  
+  // 북마크 여부 확인
+  isBookmarked: (nodeId: string) => {
+    const state = get();
+    return state.bookmarkedNodeIds.includes(nodeId);
   },
 }));
