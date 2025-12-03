@@ -37,11 +37,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from PIL import Image
 
-try:
-    # Optional OpenAI client for GPT-based prompt composition and image captioning
-    from openai import OpenAI  # type: ignore
-except ImportError:  # pragma: no cover - optional dependency
-    OpenAI = None  # type: ignore
+from openai import OpenAI  # type: ignore
+
 
 # Ensure project root is on sys.path for consistency with other app modules
 current_file_path = Path(__file__).resolve()
