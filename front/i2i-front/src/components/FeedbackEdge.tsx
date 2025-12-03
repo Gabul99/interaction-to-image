@@ -47,6 +47,7 @@ const EdgeLabel = styled.div<{ $isHovered?: boolean; $borderColor?: string }>`
   min-width: 100px;
   max-width: 180px;
   transform: ${(props) => props.$isHovered ? "scale(1.02)" : "scale(1)"};
+  z-index: 1000;
 
   &:hover {
     background: rgba(26, 26, 46, 1);
@@ -54,15 +55,16 @@ const EdgeLabel = styled.div<{ $isHovered?: boolean; $borderColor?: string }>`
   }
 `;
 
-const EdgeLabelHeader = styled.div<{ $color?: string }>`
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: ${(props) => props.$color || "#8b5cf6"};
-  font-weight: 600;
-  font-size: 10px;
-  padding-bottom: 4px;
-  border-bottom: 1px solid ${(props) => props.$color ? `${props.$color}40` : "rgba(139, 92, 246, 0.3)"};
+const FeedbackImageThumbnail = styled.img`
+  width: 100%;
+  max-width: 160px;
+  height: auto;
+  max-height: 80px;
+  object-fit: contain;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  margin-top: 4px;
+  background: rgba(0, 0, 0, 0.2);
 `;
 
 const FeedbackItem = styled.div`
@@ -103,13 +105,6 @@ const FeedbackTextContent = styled.div`
   text-overflow: ellipsis;
 `;
 
-const ImageIndicator = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  color: #8b5cf6;
-  font-size: 9px;
-`;
 
 interface FeedbackEdgeData {
   feedback?: FeedbackRecord[];
@@ -143,7 +138,7 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const { getEdges } = useReactFlow();
-  const { currentGraphSession } = useImageStore();
+  const { currentGraphSession, setHoveredFeedbackEdge } = useImageStore();
 
   const [edgePath] = getBezierPath({
     sourceX,
@@ -156,10 +151,19 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
 
   const handleMouseEnter = () => {
     setIsHovered(true);
+    // BBOX 피드백이 있는 경우 hover 상태 업데이트
+    if (branchId && feedbacks.length > 0) {
+      const bboxFeedbacks = feedbacks.filter((f) => f.area === "bbox" && f.bbox);
+      if (bboxFeedbacks.length > 0) {
+        setHoveredFeedbackEdge(branchId, bboxFeedbacks);
+      }
+    }
   };
 
   const handleMouseLeave = () => {
     setIsHovered(false);
+    // hover 해제 시 상태 초기화
+    setHoveredFeedbackEdge(null);
   };
 
   const feedbacks = data?.feedback || [];
@@ -220,15 +224,6 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
   const labelX = (sourceX + targetX) / 2;
   const labelY = (sourceY + targetY) / 2;
   
-  // 피드백 아이콘 생성
-  const getFeedbackIcon = () => {
-    if (feedbacks.length === 0) return "💬";
-    const hasText = feedbacks.some(f => f.text);
-    const hasImage = feedbacks.some(f => f.imageUrl);
-    if (hasText && hasImage) return "💬🖼️";
-    if (hasImage) return "🖼️";
-    return "💬";
-  };
 
   return (
     <>
@@ -246,21 +241,18 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
       {hasFeedback && (
         <>
           <EdgeLabelRenderer>
-            <EdgeLabel
+              <EdgeLabel
               $isHovered={isHovered}
               $borderColor={edgeColor}
               style={{
                 position: "absolute",
                 transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
                 pointerEvents: "all",
+                zIndex: 1000,
               }}
               onMouseEnter={handleMouseEnter}
               onMouseLeave={handleMouseLeave}
             >
-              <EdgeLabelHeader $color={edgeColor}>
-                <span>{getFeedbackIcon()}</span>
-                <span>피드백 ({feedbacks.length})</span>
-              </EdgeLabelHeader>
               {feedbacks.map((feedback, index) => (
                 <FeedbackItem key={feedback.id || index}>
                   <FeedbackItemHeader>
@@ -277,10 +269,14 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
                     </FeedbackTextContent>
                   )}
                   {feedback.imageUrl && (
-                    <ImageIndicator>
-                      <span>🖼️</span>
-                      <span>참조 이미지</span>
-                    </ImageIndicator>
+                    <FeedbackImageThumbnail
+                      src={feedback.imageUrl}
+                      alt="피드백 이미지"
+                      onError={(e) => {
+                        // 이미지 로드 실패 시 숨김 처리
+                        e.currentTarget.style.display = "none";
+                      }}
+                    />
                   )}
                 </FeedbackItem>
               ))}

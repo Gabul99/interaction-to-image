@@ -191,6 +191,12 @@ export interface ImageStreamState {
   // 현재 선택된 노드 ID (그래프에서)
   selectedNodeId: string | null;
 
+  // 현재 hover된 피드백 엣지 (BBOX 표시용)
+  hoveredFeedbackEdge: {
+    branchId: string;
+    bboxFeedbacks: FeedbackRecord[]; // area가 "bbox"인 피드백들만
+  } | null;
+
   // 현재 선택된 스텝 (History에서 클릭한 스텝)
   selectedStepIndex: number | null; // null이면 최신 스텝 표시
 
@@ -357,6 +363,7 @@ export interface ImageStreamState {
     edgeData?: GraphEdge["data"]
   ) => string; // edgeId 반환
   selectNode: (nodeId: string | null) => void;
+  setHoveredFeedbackEdge: (branchId: string | null, bboxFeedbacks?: FeedbackRecord[]) => void;
   simulateGraphImageStream: (
     sessionId: string,
     prompt: string,
@@ -401,6 +408,7 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   currentSession: null,
   currentGraphSession: null,
   selectedNodeId: null,
+  hoveredFeedbackEdge: null,
   selectedStepIndex: null,
   isGenerating: false,
   isPaused: false,
@@ -2464,6 +2472,15 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   // 노드 선택
   selectNode: (nodeId: string | null) => {
     set({ selectedNodeId: nodeId });
+  },
+
+  // 피드백 엣지 hover 상태 설정
+  setHoveredFeedbackEdge: (branchId: string | null, bboxFeedbacks: FeedbackRecord[] = []) => {
+    if (branchId === null) {
+      set({ hoveredFeedbackEdge: null });
+    } else {
+      set({ hoveredFeedbackEdge: { branchId, bboxFeedbacks } });
+    }
   },
 
   // 그래프 구조에 맞는 이미지 스트림 시뮬레이션 (메인 브랜치)

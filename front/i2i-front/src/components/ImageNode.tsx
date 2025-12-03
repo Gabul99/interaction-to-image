@@ -1,6 +1,7 @@
 import React from "react";
 import { Handle, Position } from "reactflow";
 import styled from "styled-components";
+import { useImageStore } from "../stores/imageStore";
 
 // Outer wrapper - includes hover area for branching button
 const NodeWrapper = styled.div`
@@ -48,6 +49,19 @@ const ImageWrapper = styled.div`
   overflow: hidden;
   background: rgba(0, 0, 0, 0.3);
   min-height: 150px;
+`;
+
+const FeedbackBboxOverlay = styled.div<{ x: number; y: number; width: number; height: number; color: string }>`
+  position: absolute;
+  left: ${(props) => props.x * 100}%;
+  top: ${(props) => props.y * 100}%;
+  width: ${(props) => props.width * 100}%;
+  height: ${(props) => props.height * 100}%;
+  border: 2px solid ${(props) => props.color};
+  background: ${(props) => `${props.color}20`};
+  pointer-events: none;
+  z-index: 10;
+  box-shadow: 0 0 8px ${(props) => `${props.color}60`};
 `;
 
 const PlaceholderImage = styled.div`
@@ -214,6 +228,7 @@ interface ImageNodeProps {
 
 const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
   const [imageLoaded, setImageLoaded] = React.useState(false);
+  const { hoveredFeedbackEdge, currentGraphSession } = useImageStore();
 
   const handleBranchClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -221,6 +236,32 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
       data.onBranchClick();
     }
   };
+
+  // 현재 노드가 hover된 피드백 엣지의 브랜치에 속하는지 확인
+  const isInHoveredBranch = React.useMemo(() => {
+    if (!hoveredFeedbackEdge || !currentGraphSession) return false;
+    
+    const branch = currentGraphSession.branches.find((b) => b.id === hoveredFeedbackEdge.branchId);
+    if (!branch) return false;
+    
+    // 브랜치의 nodes 배열에 현재 노드가 포함되어 있는지 확인
+    return branch.nodes.includes(id);
+  }, [hoveredFeedbackEdge, currentGraphSession, id]);
+
+  // 표시할 BBOX 피드백들 (feedback 정보 포함)
+  const visibleBboxes = React.useMemo(() => {
+    if (!isInHoveredBranch || !hoveredFeedbackEdge) return [];
+    
+    return hoveredFeedbackEdge.bboxFeedbacks
+      .filter((f) => f.bbox)
+      .map((f) => ({
+        feedback: f,
+        bbox: {
+          ...f.bbox!,
+          color: "#8b5cf6", // 피드백 BBOX 색상
+        },
+      }));
+  }, [isInHoveredBranch, hoveredFeedbackEdge]);
 
   React.useEffect(() => {
     if (data?.imageUrl) {
@@ -277,6 +318,18 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
               🔀 Merge
             </MergeIndicator>
           )}
+
+          {/* Feedback BBOX 오버레이 - hover된 피드백 엣지의 브랜치에 속하는 경우 표시 */}
+          {isInHoveredBranch && visibleBboxes.map((item, index) => (
+            <FeedbackBboxOverlay
+              key={item.feedback.id || `feedback-bbox-${index}`}
+              x={item.bbox.x}
+              y={item.bbox.y}
+              width={item.bbox.width}
+              height={item.bbox.height}
+              color={item.bbox.color}
+            />
+          ))}
         </ImageWrapper>
         <NodeLabel>Step {data?.step !== undefined ? data.step : "?"}</NodeLabel>
         
