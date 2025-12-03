@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import styled from "styled-components";
 import GraphCanvas from "./components/GraphCanvas";
+import SimpleGraphCanvas from "./components/SimpleGraphCanvas";
 import CompositionModal from "./components/CompositionModal";
 
 const AppContainer = styled.div`
@@ -23,6 +24,14 @@ const GraphContainer = styled.div`
 function App() {
   const [compositionModalVisible, setCompositionModalVisible] = useState(false);
 
+  // URL 쿼리 파라미터에서 mode 읽기 (기본값: step)
+  const mode = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    const modeParam = params.get("mode");
+    // mode=prompt면 베이스라인, mode=step이거나 없으면 기존 시스템
+    return modeParam === "prompt" ? "prompt" : "step";
+  }, []);
+
   const handleAddNodeClick = () => {
     setCompositionModalVisible(true);
   };
@@ -32,6 +41,19 @@ function App() {
     // 이미지 생성이 시작되면 GraphCanvas에서 처리됨
   };
 
+  // mode에 따라 다른 컴포넌트 렌더링
+  if (mode === "prompt") {
+    // 베이스라인 모드 (SimpleGraphCanvas)
+    return (
+      <AppContainer>
+        <GraphContainer>
+          <SimpleGraphCanvas />
+        </GraphContainer>
+      </AppContainer>
+    );
+  }
+
+  // 기본 모드 (기존 시스템 - GraphCanvas)
   return (
     <AppContainer>
       <GraphContainer>
