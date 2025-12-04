@@ -139,8 +139,8 @@ const SimpleGraphCanvas: React.FC = () => {
         setActivePromptId(id);
       };
 
-      const handleUploadImage = (file: File | null) => {
-        if (!file) {
+      const handleUploadImages = (files: File[] | null) => {
+        if (!files || files.length === 0) {
           setNodes((prev) =>
             prev.map((node) =>
               node.id === id
@@ -148,9 +148,9 @@ const SimpleGraphCanvas: React.FC = () => {
                     ...node,
                     data: {
                       ...(node.data as SimplePromptNodeData),
-                      inputImagePreviewUrl: null,
-                      inputImageDataUrl: null,
-                      inputImageSourceNodeId: null,
+                      inputImagePreviewUrls: [],
+                      inputImageDataUrls: [],
+                      inputImageSourceNodeIds: [],
                     },
                   }
                 : node
@@ -159,10 +159,25 @@ const SimpleGraphCanvas: React.FC = () => {
           return;
         }
 
-        const reader = new FileReader();
-        reader.onload = () => {
-          const result = typeof reader.result === "string" ? reader.result : null;
-          if (!result) return;
+        const readers = files.map(
+          (file) =>
+            new Promise<string | null>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const result =
+                  typeof reader.result === "string" ? reader.result : null;
+                resolve(result);
+              };
+              reader.onerror = () => resolve(null);
+              reader.readAsDataURL(file);
+            })
+        );
+
+        Promise.all(readers).then((results) => {
+          const validResults = results.filter(
+            (r): r is string => r !== null && r !== undefined
+          );
+          if (validResults.length === 0) return;
           setNodes((prev) =>
             prev.map((node) =>
               node.id === id
@@ -170,16 +185,72 @@ const SimpleGraphCanvas: React.FC = () => {
                     ...node,
                     data: {
                       ...(node.data as SimplePromptNodeData),
-                      inputImagePreviewUrl: result,
-                      inputImageDataUrl: result,
-                      inputImageSourceNodeId: null,
+                      // Append new uploads to any existing images (including those from edges)
+                      ...(() => {
+                        const data = node.data as SimplePromptNodeData;
+                        const prevPreview = data.inputImagePreviewUrls ?? [];
+                        const prevData = data.inputImageDataUrls ?? [];
+                        const prevSourceIds =
+                          data.inputImageSourceNodeIds ?? [];
+
+                        return {
+                          inputImagePreviewUrls: [
+                            ...prevPreview,
+                            ...validResults,
+                          ],
+                          inputImageDataUrls: [...prevData, ...validResults],
+                          // Uploaded images have no source node; align array lengths with nulls
+                          inputImageSourceNodeIds: [
+                            ...prevSourceIds,
+                            ...validResults.map(() => null),
+                          ],
+                        };
+                      })(),
                     },
                   }
                 : node
             )
           );
-        };
-        reader.readAsDataURL(file);
+        });
+      };
+
+      const handleRemoveInputImage = (index: number) => {
+        let sourceNodeIdToDetach: string | null = null;
+
+        setNodes((prev) =>
+          prev.map((node) => {
+            if (node.id !== id || node.type !== "prompt") return node;
+            const data = node.data as SimplePromptNodeData;
+            const previews = data.inputImagePreviewUrls ?? [];
+            const datas = data.inputImageDataUrls ?? [];
+            const sources = data.inputImageSourceNodeIds ?? [];
+
+            sourceNodeIdToDetach =
+              sources[index] !== undefined ? sources[index] ?? null : null;
+
+            return {
+              ...node,
+              data: {
+                ...data,
+                inputImagePreviewUrls: previews.filter(
+                  (_v, i) => i !== index
+                ),
+                inputImageDataUrls: datas.filter((_v, i) => i !== index),
+                inputImageSourceNodeIds: sources.filter(
+                  (_v, i) => i !== index
+                ),
+              },
+            };
+          })
+        );
+
+        if (sourceNodeIdToDetach) {
+          setEdges((prev) =>
+            prev.filter(
+              (e) => !(e.source === sourceNodeIdToDetach && e.target === id)
+            )
+          );
+        }
       };
 
       return {
@@ -189,14 +260,15 @@ const SimpleGraphCanvas: React.FC = () => {
         data: {
           prompt: "",
           onChangePrompt: handleChangePrompt,
-          inputImagePreviewUrl: null,
-          inputImageDataUrl: null,
-          inputImageSourceNodeId: null,
-          onUploadImage: handleUploadImage,
+          inputImagePreviewUrls: [],
+          inputImageDataUrls: [],
+          inputImageSourceNodeIds: [],
+          onUploadImages: handleUploadImages,
+          onRemoveInputImage: handleRemoveInputImage,
         } as SimplePromptNodeData,
       };
     },
-    [setNodes]
+    [setNodes, setEdges]
   );
 
   // Initialize with a single prompt node
@@ -235,31 +307,38 @@ const SimpleGraphCanvas: React.FC = () => {
 
     // Determine previous prompt and optional input image (uploaded or from graph)
     let previousPromptText: string | null = null;
-    let inputImageDataUrl: string | null =
-      promptData.inputImageDataUrl ?? null;
+    let inputImageDataUrls: string[] =
+      promptData.inputImageDataUrls ?? [];
 
     // If this prompt is connected from an image node, use that image and its parent's prompt
-    const incomingImageEdge = edges.find((e) => e.target === activePromptId);
-    if (incomingImageEdge) {
-      const sourceNode = nodes.find((n) => n.id === incomingImageEdge.source);
-      if (sourceNode?.type === "image") {
-        const imageData = (sourceNode.data as {
-          imageUrl?: string;
-          parentPromptId?: string;
-        }).imageUrl;
-        if (!inputImageDataUrl && imageData) {
-          inputImageDataUrl = imageData;
-        }
-        const parentPromptId = (sourceNode.data as {
-          parentPromptId?: string;
-        }).parentPromptId;
-        if (parentPromptId) {
-          const parentPromptNode = nodes.find(
-            (n) => n.id === parentPromptId && n.type === "prompt"
-          );
-          if (parentPromptNode) {
-            previousPromptText =
-              (parentPromptNode.data as SimplePromptNodeData).prompt ?? null;
+    const incomingImageEdges = edges.filter((e) => e.target === activePromptId);
+    if (incomingImageEdges.length > 0) {
+      const existingSet = new Set(inputImageDataUrls);
+      for (const edge of incomingImageEdges) {
+        const sourceNode = nodes.find((n) => n.id === edge.source);
+        if (sourceNode?.type === "image") {
+          const imageData = (sourceNode.data as {
+            imageUrl?: string;
+            parentPromptId?: string;
+          }).imageUrl;
+          if (imageData && !existingSet.has(imageData)) {
+            existingSet.add(imageData);
+            inputImageDataUrls.push(imageData);
+          }
+          if (previousPromptText == null) {
+            const parentPromptId = (sourceNode.data as {
+              parentPromptId?: string;
+            }).parentPromptId;
+            if (parentPromptId) {
+              const parentPromptNode = nodes.find(
+                (n) => n.id === parentPromptId && n.type === "prompt"
+              );
+              if (parentPromptNode) {
+                previousPromptText =
+                  (parentPromptNode.data as SimplePromptNodeData).prompt ??
+                  null;
+              }
+            }
           }
         }
       }
@@ -372,12 +451,12 @@ const SimpleGraphCanvas: React.FC = () => {
 
     try {
       let res: SimpleGenerateResponse;
-      if (inputImageDataUrl) {
+      if (inputImageDataUrls.length > 0) {
         res = await generateWithImage({
           current_prompt: promptText.trim(),
           previous_prompt: previousPromptText,
           num_images: 4,
-          imageDataUrl: inputImageDataUrl,
+          imageDataUrls: inputImageDataUrls,
         });
       } else {
         res = await generateSimpleImages({
@@ -505,15 +584,41 @@ const SimpleGraphCanvas: React.FC = () => {
                 ...n,
                 data: {
                   ...(n.data as SimplePromptNodeData),
-                  inputImagePreviewUrl:
-                    imageUrl ??
-                    (n.data as SimplePromptNodeData).inputImagePreviewUrl ??
-                    null,
-                  inputImageDataUrl:
-                    imageUrl ??
-                    (n.data as SimplePromptNodeData).inputImageDataUrl ??
-                    null,
-                  inputImageSourceNodeId: sourceNode.id,
+                  // Append this connected image to the prompt node's input image arrays
+                  ...(() => {
+                    const data = n.data as SimplePromptNodeData;
+                    const prevPreview =
+                      data.inputImagePreviewUrls ?? [];
+                    const prevData = data.inputImageDataUrls ?? [];
+                    const prevSourceIds =
+                      data.inputImageSourceNodeIds ?? [];
+
+                    if (!imageUrl) {
+                      return {
+                        inputImagePreviewUrls: prevPreview,
+                        inputImageDataUrls: prevData,
+                        inputImageSourceNodeIds: prevSourceIds,
+                      };
+                    }
+
+                    // Avoid duplicates by data URL
+                    if (prevData.includes(imageUrl)) {
+                      return {
+                        inputImagePreviewUrls: prevPreview,
+                        inputImageDataUrls: prevData,
+                        inputImageSourceNodeIds: prevSourceIds,
+                      };
+                    }
+
+                    return {
+                      inputImagePreviewUrls: [...prevPreview, imageUrl],
+                      inputImageDataUrls: [...prevData, imageUrl],
+                      inputImageSourceNodeIds: [
+                        ...prevSourceIds,
+                        sourceNode.id,
+                      ],
+                    };
+                  })(),
                 },
               }
             : n
@@ -561,21 +666,24 @@ const SimpleGraphCanvas: React.FC = () => {
       return { highlightedNodes: nodes, highlightedEdges: edges };
     }
 
-    // Walk the ancestor chain from the selected node back to the root
+    // Walk all ancestor chains from the selected node back to the root,
+    // supporting multiple parents (e.g., prompts with multiple input images).
     const pathNodeIds = new Set<string>();
     const pathEdgeIds = new Set<string>();
 
-    let currentId: string | null = selectedNodeId;
-    while (currentId) {
+    const queue: string[] = [selectedNodeId];
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      if (pathNodeIds.has(currentId)) continue;
       pathNodeIds.add(currentId);
-      // Find the first incoming edge (treat its source as the parent)
-      const incoming = edges.find((e) => e.target === currentId);
-      if (!incoming) break;
-      pathEdgeIds.add(incoming.id);
-      currentId = incoming.source;
-      if (pathNodeIds.has(currentId)) {
-        // Prevent cycles (shouldn't happen in our tree-like graph)
-        break;
+
+      // All incoming edges are considered parents
+      const incomingEdges = edges.filter((e) => e.target === currentId);
+      for (const incoming of incomingEdges) {
+        pathEdgeIds.add(incoming.id);
+        if (!pathNodeIds.has(incoming.source)) {
+          queue.push(incoming.source);
+        }
       }
     }
 

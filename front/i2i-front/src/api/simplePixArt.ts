@@ -68,7 +68,10 @@ export interface GenerateWithImageParams {
   height?: number;
   guidance_scale?: number;
   num_inference_steps?: number;
-  imageDataUrl: string; // data URL (e.g., data:image/png;base64,...)
+  // Single-image path (legacy)
+  imageDataUrl?: string; // data URL (e.g., data:image/png;base64,...)
+  // Multi-image path
+  imageDataUrls?: string[]; // array of data URLs
 }
 
 export async function generateWithImage(
@@ -91,10 +94,36 @@ export async function generateWithImage(
     String(params.num_inference_steps ?? 50)
   );
 
-  // Convert data URL to Blob via fetch (works in browser)
-  const blob = await fetch(params.imageDataUrl).then((r) => r.blob());
-  const file = new File([blob], "input.png", { type: blob.type || "image/png" });
-  form.append("image", file);
+  // Normalize to an array of data URLs (support single and multiple images)
+  const urls: string[] =
+    params.imageDataUrls && params.imageDataUrls.length
+      ? params.imageDataUrls
+      : params.imageDataUrl
+      ? [params.imageDataUrl]
+      : [];
+
+  if (!urls.length) {
+    throw new Error("generateWithImage requires at least one imageDataUrl");
+  }
+
+  // Convert data URLs to Blobs via fetch (works in browser)
+  const blobs = await Promise.all(urls.map((u) => fetch(u).then((r) => r.blob())));
+
+  // First image sent under \"image\" for backward compatibility
+  const primaryBlob = blobs[0];
+  const primaryFile = new File([primaryBlob], "input-0.png", {
+    type: primaryBlob.type || "image/png",
+  });
+  form.append("image", primaryFile);
+
+  // Remaining images (if any) sent under \"images\"
+  for (let i = 1; i < blobs.length; i++) {
+    const blob = blobs[i];
+    const file = new File([blob], `input-${i}.png`, {
+      type: blob.type || "image/png",
+    });
+    form.append("images", file);
+  }
 
   const res = await fetch(`${SIMPLE_PIXART_API_BASE_URL}/generate_with_image`, {
     method: "POST",

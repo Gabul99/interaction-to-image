@@ -91,13 +91,45 @@ const ImagePreview = styled.img`
   border: 1px solid rgba(148, 163, 184, 0.8);
 `;
 
+const ImagePreviewWrapper = styled.div`
+  position: relative;
+  display: inline-block;
+`;
+
+const RemoveImageButton = styled.button`
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(15, 23, 42, 0.9);
+  color: #e5e7eb;
+  font-size: 10px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.8);
+  padding: 0;
+
+  &:hover {
+    background: rgba(239, 68, 68, 0.95);
+    box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.9);
+  }
+`;
+
 export interface SimplePromptNodeData {
   prompt: string;
   onChangePrompt: (value: string) => void;
-  inputImagePreviewUrl?: string | null;
-  inputImageDataUrl?: string | null;
-  inputImageSourceNodeId?: string | null;
-  onUploadImage?: (file: File | null) => void;
+  // Multiple input images are supported; these arrays may be empty or null
+  inputImagePreviewUrls?: string[] | null;
+  inputImageDataUrls?: string[] | null;
+  inputImageSourceNodeIds?: string[] | null;
+  onUploadImages?: (files: File[] | null) => void;
+   onRemoveInputImage?: (index: number) => void;
 }
 
 export interface SimplePromptNodeProps {
@@ -131,17 +163,35 @@ const SimplePromptNode: React.FC<SimplePromptNodeProps> = ({
             <HiddenFileInput
               type="file"
               accept="image/*"
+              multiple
               onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (data.onUploadImage) {
-                  data.onUploadImage(file ?? null);
+                const files = e.target.files
+                  ? Array.from(e.target.files)
+                  : [];
+                if (data.onUploadImages) {
+                  data.onUploadImages(files.length ? files : null);
                 }
               }}
             />
           </UploadLabel>
-          {data.inputImagePreviewUrl && (
-            <ImagePreview src={data.inputImagePreviewUrl} alt="Input" />
-          )}
+          {data.inputImagePreviewUrls &&
+            data.inputImagePreviewUrls.map((url, index) => (
+              <ImagePreviewWrapper key={index}>
+                <ImagePreview src={url} alt={`Input ${index + 1}`} />
+                {data.onRemoveInputImage && (
+                  <RemoveImageButton
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      data.onRemoveInputImage?.(index);
+                    }}
+                    title="Remove input image"
+                  >
+                    ×
+                  </RemoveImageButton>
+                )}
+              </ImagePreviewWrapper>
+            ))}
         </ImageRow>
       </NodeContainer>
       {/* Visible source handle on the right: generated images connect here */}
