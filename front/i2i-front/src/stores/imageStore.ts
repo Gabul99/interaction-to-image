@@ -361,6 +361,19 @@ export interface ImageStreamState {
     nodeId: string,
     prompt: string
   ) => void;
+  updatePromptNodePrompt: (
+    sessionId: string,
+    nodeId: string,
+    prompt: string
+  ) => void;
+  addEmptyPromptNode: (
+    sessionId: string,
+    position: { x: number; y: number }
+  ) => string; // nodeId 반환
+  removeImageNodesAfterPrompt: (
+    sessionId: string,
+    promptNodeId: string
+  ) => void; // PromptNode 뒤의 모든 이미지 노드 제거
   addEdge: (
     sessionId: string,
     source: string,
@@ -385,6 +398,7 @@ export interface ImageStreamState {
   
   // Remove a node and all its descendants (for backtracking)
   removeNodeAndDescendants: (sessionId: string, nodeId: string) => void;
+  removePromptNodeAndBranch: (sessionId: string, promptNodeId: string) => void; // 프롬프트 노드와 연결된 모든 노드 및 브랜치 제거
   
   // Parallel session support
   // Map of prompt node ID -> backend session info
@@ -2508,6 +2522,144 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     });
   },
 
+  // Prompt 노드 프롬프트 업데이트
+  updatePromptNodePrompt: (
+    sessionId: string,
+    nodeId: string,
+    prompt: string
+  ) => {
+    const state = get();
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
+      return;
+    }
+
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        nodes: state.currentGraphSession.nodes.map((node) =>
+          node.id === nodeId && node.type === "prompt"
+            ? { ...node, data: { ...node.data, prompt } }
+            : node
+        ),
+      },
+    });
+  },
+
+  // 빈 Prompt 노드 추가 (백엔드 세션 없이)
+  addEmptyPromptNode: (
+    sessionId: string,
+    position: { x: number; y: number }
+  ): string => {
+    const state = get();
+    const session = state.currentGraphSession;
+    if (!session || session.id !== sessionId) {
+      console.error("[ImageStore] 세션을 찾을 수 없습니다:", sessionId);
+      throw new Error("Session not found");
+    }
+
+    // Find existing prompt nodes to calculate row index
+    const existingPromptNodes = session.nodes.filter(
+      (n) => n.type === "prompt"
+    );
+    const newRowIndex = existingPromptNodes.length;
+
+    const nodeId = `node_prompt_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const promptNode: GraphNode = {
+      id: nodeId,
+      type: "prompt",
+      data: {
+        prompt: "",
+        rowIndex: newRowIndex,
+      },
+      position,
+    };
+
+    const updatedSession: GraphSession = {
+      ...session,
+      nodes: [...session.nodes, promptNode],
+    };
+
+    set({ currentGraphSession: updatedSession });
+    console.log("[ImageStore] 빈 Prompt 노드 추가:", nodeId);
+    return nodeId;
+  },
+
+  // Prompt 노드 뒤의 모든 이미지 노드 제거 (재생성 시 사용)
+  // BFS를 사용하여 Prompt 노드에서 시작해서 연결된 모든 이미지/로딩 노드를 재귀적으로 찾아 제거
+  removeImageNodesAfterPrompt: (
+    sessionId: string,
+    promptNodeId: string
+  ): void => {
+    const state = get();
+    const session = state.currentGraphSession;
+    if (!session || session.id !== sessionId) {
+      console.error("[ImageStore] 세션을 찾을 수 없습니다:", sessionId);
+      return;
+    }
+
+    // Prompt 노드 찾기
+    const promptNode = session.nodes.find(
+      (n) => n.id === promptNodeId && n.type === "prompt"
+    );
+    if (!promptNode) {
+      console.error("[ImageStore] Prompt 노드를 찾을 수 없습니다:", promptNodeId);
+      return;
+    }
+
+    // BFS를 사용하여 Prompt 노드에서 시작해서 연결된 모든 이미지/로딩 노드 찾기
+    const nodesToRemove = new Set<string>();
+    const queue: string[] = [promptNodeId];
+    const visited = new Set<string>();
+
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      if (visited.has(currentId)) continue;
+      visited.add(currentId);
+
+      // 현재 노드가 이미지나 로딩 노드이면 제거 대상에 추가
+      const currentNode = session.nodes.find((n) => n.id === currentId);
+      if (currentNode && (currentNode.type === "image" || currentNode.type === "loading")) {
+        nodesToRemove.add(currentId);
+      }
+
+      // 현재 노드에서 나가는 모든 엣지를 찾아서 자식 노드들을 큐에 추가
+      for (const edge of session.edges) {
+        if (edge.source === currentId && !visited.has(edge.target)) {
+          queue.push(edge.target);
+        }
+      }
+    }
+
+    // 연결된 엣지도 제거 (제거 대상 노드와 관련된 모든 엣지)
+    const edgesToRemove = session.edges.filter(
+      (e) => nodesToRemove.has(e.source) || nodesToRemove.has(e.target)
+    );
+
+    // 노드와 엣지 제거
+    const updatedNodes = session.nodes.filter(
+      (n) => !nodesToRemove.has(n.id)
+    );
+    const updatedEdges = session.edges.filter(
+      (e) => !edgesToRemove.some((er) => er.id === e.id)
+    );
+
+    set({
+      currentGraphSession: {
+        ...session,
+        nodes: updatedNodes,
+        edges: updatedEdges,
+      },
+    });
+
+    console.log(
+      `[ImageStore] Prompt 노드 ${promptNodeId} 뒤의 ${nodesToRemove.size}개 노드 제거됨:`,
+      Array.from(nodesToRemove)
+    );
+  },
+
   // 노드 선택
   selectNode: (nodeId: string | null) => {
     set({ selectedNodeId: nodeId });
@@ -2836,6 +2988,104 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     console.log(`[ImageStore] Removed ${nodesToRemove.size} nodes, ${branchesToRemove.length} branches. Remaining: ${newNodes.length} nodes, ${updatedBranches.length} branches`);
   },
 
+  // 프롬프트 노드와 연결된 모든 노드 및 브랜치 제거
+  removePromptNodeAndBranch: (sessionId: string, promptNodeId: string) => {
+    const state = get();
+    if (!state.currentGraphSession || state.currentGraphSession.id !== sessionId) {
+      console.warn("[ImageStore] Cannot remove prompt node: session not found");
+      return;
+    }
+
+    const { nodes, edges, branches } = state.currentGraphSession;
+    
+    // 프롬프트 노드 찾기
+    const promptNode = nodes.find((n) => n.id === promptNodeId && n.type === "prompt");
+    if (!promptNode) {
+      console.warn("[ImageStore] Prompt node not found:", promptNodeId);
+      return;
+    }
+
+    // BFS를 사용하여 프롬프트 노드에서 시작해서 연결된 모든 하위 노드 찾기
+    const nodesToRemove = new Set<string>();
+    const queue = [promptNodeId];
+    
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      nodesToRemove.add(currentId);
+      
+      // Find all children (nodes that have edges from currentId)
+      for (const edge of edges) {
+        if (edge.source === currentId && !nodesToRemove.has(edge.target)) {
+          queue.push(edge.target);
+        }
+      }
+    }
+    
+    console.log(`[ImageStore] Removing prompt node and descendants: ${Array.from(nodesToRemove).join(", ")}`);
+    
+    // Filter out removed nodes and edges
+    const newNodes = nodes.filter((n) => !nodesToRemove.has(n.id));
+    const newEdges = edges.filter(
+      (e) => !nodesToRemove.has(e.source) || !nodesToRemove.has(e.target)
+    );
+    
+    // Get unique branch ID from prompt node
+    const uniqueBranchId = promptNode.data?.uniqueBranchId as string | undefined;
+    
+    // Update branches to remove references to deleted nodes
+    let updatedBranches = branches.map((branch) => ({
+      ...branch,
+      nodes: branch.nodes.filter((nid) => !nodesToRemove.has(nid)),
+    }));
+    
+    // Remove the branch associated with this prompt node
+    if (uniqueBranchId) {
+      const branchToRemove = updatedBranches.find((b) => b.id === uniqueBranchId);
+      if (branchToRemove) {
+        console.log(`[ImageStore] Removing branch: ${uniqueBranchId}`);
+        updatedBranches = updatedBranches.filter((b) => b.id !== uniqueBranchId);
+      }
+    }
+    
+    // Also remove any other empty branches (except main branch B0)
+    const branchesToRemove = updatedBranches.filter((branch) => {
+      const backendBranchId = extractBackendBranchId(branch.id);
+      if (backendBranchId === "B0") return false;
+      return branch.nodes.length === 0;
+    });
+    
+    if (branchesToRemove.length > 0) {
+      console.log(`[ImageStore] Removing empty branches: ${branchesToRemove.map(b => b.id).join(", ")}`);
+      const branchIdsToRemove = new Set(branchesToRemove.map(b => b.id));
+      updatedBranches = updatedBranches.filter(b => !branchIdsToRemove.has(b.id));
+    }
+    
+    // Remove from parallelSessions
+    const newParallelSessions = new Map(state.parallelSessions);
+    if (newParallelSessions.has(promptNodeId)) {
+      console.log(`[ImageStore] Removing parallel session for prompt node: ${promptNodeId}`);
+      newParallelSessions.delete(promptNodeId);
+    }
+    
+    // Clear selection if the selected node was removed
+    const newSelectedNodeId = nodesToRemove.has(state.selectedNodeId || "")
+      ? null
+      : state.selectedNodeId;
+    
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        nodes: newNodes,
+        edges: newEdges,
+        branches: updatedBranches,
+      },
+      parallelSessions: newParallelSessions,
+      selectedNodeId: newSelectedNodeId,
+    });
+    
+    console.log(`[ImageStore] Prompt node ${promptNodeId} and all connected nodes removed`);
+  },
+
   // Register a parallel session for a prompt node
   registerParallelSession: (promptNodeId: string, backendSessionId: string, backendBranchId: string) => {
     const state = get();
@@ -2934,11 +3184,23 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       return null;
     }
 
-    // Find existing prompt nodes to calculate row index
-    const existingPromptNodes = state.currentGraphSession.nodes.filter(
-      (n) => n.type === "prompt"
-    );
-    const newRowIndex = existingPromptNodes.length;
+    // Check if we're updating an existing prompt node
+    const existingPromptNode = placeholderNodeId 
+      ? state.currentGraphSession.nodes.find((n) => n.id === placeholderNodeId && n.type === "prompt")
+      : null;
+    
+    // Calculate row index: use existing rowIndex if updating, otherwise calculate new one
+    let newRowIndex: number;
+    if (existingPromptNode?.data?.rowIndex !== undefined) {
+      // Keep existing rowIndex when updating
+      newRowIndex = existingPromptNode.data.rowIndex as number;
+    } else {
+      // Calculate new rowIndex for new prompt node
+      const existingPromptNodes = state.currentGraphSession.nodes.filter(
+        (n) => n.type === "prompt"
+      );
+      newRowIndex = existingPromptNodes.length;
+    }
     
     // Calculate position for new prompt node
     let newPosition: { x: number; y: number };
@@ -2951,6 +3213,9 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
       );
       if (placeholderNode) {
         newPosition = placeholderNode.position;
+      } else if (existingPromptNode) {
+        // Keep existing position when updating prompt node
+        newPosition = existingPromptNode.position;
       } else {
         // Default position based on row index
         newPosition = {
@@ -3005,11 +3270,24 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
     // Update or add the node
     let updatedNodes: GraphNode[];
     if (placeholderNodeId) {
-      // Convert placeholder to prompt node
-      updatedNodes = state.currentGraphSession.nodes.map((n) =>
-        n.id === placeholderNodeId ? newPromptNode : n
-      );
-      console.log(`[ImageStore] Converted placeholder ${placeholderNodeId} to prompt node`);
+      // Convert placeholder to prompt node or update existing prompt node
+      const existingNode = state.currentGraphSession.nodes.find((n) => n.id === placeholderNodeId);
+      if (existingNode?.type === "placeholder") {
+        // Convert placeholder to prompt node
+        updatedNodes = state.currentGraphSession.nodes.map((n) =>
+          n.id === placeholderNodeId ? newPromptNode : n
+        );
+        console.log(`[ImageStore] Converted placeholder ${placeholderNodeId} to prompt node`);
+      } else if (existingNode?.type === "prompt") {
+        // Update existing prompt node with new session info
+        updatedNodes = state.currentGraphSession.nodes.map((n) =>
+          n.id === placeholderNodeId ? newPromptNode : n
+        );
+        console.log(`[ImageStore] Updated prompt node ${placeholderNodeId} with new session info`);
+      } else {
+        // Add new prompt node
+        updatedNodes = [...state.currentGraphSession.nodes, newPromptNode];
+      }
     } else {
       // Add new prompt node
       updatedNodes = [...state.currentGraphSession.nodes, newPromptNode];

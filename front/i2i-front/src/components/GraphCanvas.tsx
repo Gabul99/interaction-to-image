@@ -20,7 +20,6 @@ import { connectImageStream } from "../api/websocket";
 import { type GraphNode } from "../types";
 import PromptNode from "./PromptNode";
 import ImageNode from "./ImageNode";
-import PlaceholderNode from "./PlaceholderNode";
 import LoadingNode from "./LoadingNode";
 import BranchingModal from "./BranchingModal";
 import CompositionModal from "./CompositionModal";
@@ -87,7 +86,6 @@ const BookmarkPanelWrapper: React.FC<{
 const nodeTypes: NodeTypes = {
   prompt: PromptNode,
   image: ImageNode,
-  placeholder: PlaceholderNode,
   loading: LoadingNode,
 };
 
@@ -354,18 +352,19 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     selectNode,
     backendSessionId,
     initializeEmptyGraphSession,
-    addPlaceholderNode,
     addEdge,
     updateNodePosition,
-    updatePlaceholderNodePrompt,
+    addEmptyPromptNode,
+    updatePromptNodePrompt,
     addPromptNodeToGraph,
+    removeImageNodesAfterPrompt,
     registerParallelSession,
     createGraphSession,
   } = useImageStore();
   const [branchingModalVisible, setBranchingModalVisible] = useState(false);
   const [branchingNodeId, setBranchingNodeId] = useState<string | null>(null);
   const [compositionModalVisible, setCompositionModalVisible] = useState(false);
-  const [compositionModalPlaceholderNodeId, setCompositionModalPlaceholderNodeId] = useState<string | null>(null);
+  const [compositionModalPromptNodeId, setCompositionModalPromptNodeId] = useState<string | null>(null);
   const [isStepping, setIsStepping] = useState(false);
   const [isRunningToEnd, setIsRunningToEnd] = useState(false);
   
@@ -1032,23 +1031,34 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         };
       }
 
-      // Placeholder node에 대한 핸들러 추가
-      let placeholderHandlers: any = {};
-      if (node.type === "placeholder") {
-        placeholderHandlers = {
+      // Prompt node에 대한 핸들러 추가
+      let promptHandlers: any = {};
+      if (node.type === "prompt") {
+        // Prompt 노드 뒤에 이미지 노드가 있는지 확인
+        const uniqueBranchId = node.data?.uniqueBranchId as string | undefined;
+        const hasGeneratedImages = uniqueBranchId
+          ? currentGraphSession.nodes.some(
+              (n) =>
+                n.type === "image" &&
+                getNodeBranchId(n.id) === uniqueBranchId
+            )
+          : false;
+
+        promptHandlers = {
           prompt: node.data?.prompt || "",
           onChangePrompt: (value: string) => {
             if (currentGraphSession) {
-              updatePlaceholderNodePrompt(currentGraphSession.id, node.id, value);
+              updatePromptNodePrompt(currentGraphSession.id, node.id, value);
             }
           },
           onOpenComposition: () => {
-            setCompositionModalPlaceholderNodeId(node.id);
+            setCompositionModalPromptNodeId(node.id);
             setCompositionModalVisible(true);
           },
           onGenerate: () => {
             handleGenerateWithoutComposition(node.id);
           },
+          hasGeneratedImages,
         };
       }
 
@@ -1058,7 +1068,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         position: fixedPosition,
         data: {
           ...node.data,
-          ...placeholderHandlers,
+          ...promptHandlers,
           onBranchClick:
             node.type === "image"
               ? () => {
@@ -2286,7 +2296,20 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         }
         
         event.preventDefault();
-        handleBacktrack();
+        
+        // Find the selected node
+        const selectedNode = currentGraphSession.nodes.find((n) => n.id === selectedNodeId);
+        if (!selectedNode) return;
+        
+        // 프롬프트 노드인 경우 특별 처리
+        if (selectedNode.type === "prompt") {
+          const { removePromptNodeAndBranch } = useImageStore.getState();
+          removePromptNodeAndBranch(currentGraphSession.id, selectedNodeId);
+          console.log("[GraphCanvas] Prompt node and all connected nodes removed");
+        } else if (selectedNode.type === "image") {
+          // 이미지 노드인 경우 기존 backtrack 로직 사용
+          handleBacktrack();
+        }
       }
     };
     
@@ -2294,42 +2317,53 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [selectedNodeId, currentGraphSession, handleBacktrack]);
 
-  // Handle Add Placeholder Node button click
-  const handleAddPlaceholderNode = useCallback(() => {
+  // Handle Add Prompt Node button click
+  const handleAddPromptNode = useCallback(() => {
     if (!currentGraphSession) return;
     
     // Canvas 중앙 위치 계산 (대략적인 값)
     const centerPosition = { x: 400, y: 300 };
     
     try {
-      addPlaceholderNode(
-        currentGraphSession.id,
-        centerPosition,
-        onAddNodeClick // placeholder node 클릭 시 CompositionModal 열기
-      );
-      console.log("[GraphCanvas] Placeholder node 추가됨");
+      addEmptyPromptNode(currentGraphSession.id, centerPosition);
+      console.log("[GraphCanvas] Prompt node 추가됨");
     } catch (error) {
-      console.error("[GraphCanvas] Placeholder node 추가 실패:", error);
+      console.error("[GraphCanvas] Prompt node 추가 실패:", error);
     }
-  }, [currentGraphSession, addPlaceholderNode, onAddNodeClick]);
+  }, [currentGraphSession, addEmptyPromptNode]);
 
-  // Handle Generate without composition (바로 생성)
-  const handleGenerateWithoutComposition = useCallback(async (placeholderNodeId: string) => {
+  // Handle Generate without composition (바로 생성 / 재생성)
+  const handleGenerateWithoutComposition = useCallback(async (promptNodeId: string) => {
     if (!currentGraphSession) return;
 
-    const placeholderNode = currentGraphSession.nodes.find(
-      (n) => n.id === placeholderNodeId && n.type === "placeholder"
+    const promptNode = currentGraphSession.nodes.find(
+      (n) => n.id === promptNodeId && n.type === "prompt"
     );
 
-    if (!placeholderNode) {
-      console.error("[GraphCanvas] Placeholder node를 찾을 수 없습니다:", placeholderNodeId);
+    if (!promptNode) {
+      console.error("[GraphCanvas] Prompt node를 찾을 수 없습니다:", promptNodeId);
       return;
     }
 
-    const prompt = placeholderNode.data?.prompt as string | undefined;
+    const prompt = promptNode.data?.prompt as string | undefined;
     if (!prompt || prompt.trim().length === 0) {
       console.error("[GraphCanvas] 프롬프트가 없습니다!");
       return;
+    }
+
+    // 재생성인 경우: 기존 이미지 노드들 제거
+    const uniqueBranchId = promptNode.data?.uniqueBranchId as string | undefined;
+    const hasGeneratedImages = uniqueBranchId
+      ? currentGraphSession.nodes.some(
+          (n) =>
+            n.type === "image" &&
+            getNodeBranchId(n.id) === uniqueBranchId
+        )
+      : false;
+
+    if (hasGeneratedImages) {
+      console.log("[GraphCanvas] 재생성: 기존 이미지 노드 제거 중...");
+      removeImageNodesAfterPrompt(currentGraphSession.id, promptNodeId);
     }
 
     try {
@@ -2357,14 +2391,15 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         // Add new prompt node to existing graph session (parallel session)
         console.log("[GraphCanvas] Adding parallel session to existing graph");
         
+        // prompt node를 업데이트하여 세션 정보 추가 (첫 생성이든 재생성이든 동일)
         createdPromptNodeId = addPromptNodeToGraph(
           prompt,
           sessionId,
           activeBranchId,
           undefined, // No bboxes
           undefined, // No sketch layers
-          placeholderNode.position, // Use placeholder position
-          placeholderNodeId // Pass placeholder node ID to convert it
+          promptNode.position, // Use prompt node position
+          promptNodeId // Pass prompt node ID to update it
         );
         
         if (createdPromptNodeId) {
@@ -2552,7 +2587,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         }`
       );
     }
-  }, [currentGraphSession, addPromptNodeToGraph, registerParallelSession, createGraphSession, selectNode, stepInterval, getNodeBranchId, getBranchRowIndexLocal, calculatePositionWithOffset]);
+  }, [currentGraphSession, addPromptNodeToGraph, updatePromptNodePrompt, removeImageNodesAfterPrompt, registerParallelSession, createGraphSession, selectNode, stepInterval, getNodeBranchId, getBranchRowIndexLocal, calculatePositionWithOffset]);
 
   // currentGraphSession이 없으면 빈 세션을 생성하므로 여기서는 항상 세션이 존재함
   // EmptyState는 더 이상 필요하지 않음
@@ -2605,7 +2640,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         >
           {/* 새로운 node 만들기 Button */}
           <button
-            onClick={handleAddPlaceholderNode}
+            onClick={handleAddPromptNode}
             disabled={!currentGraphSession}
             style={{
               padding: "10px 16px",
@@ -2738,26 +2773,26 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         compositionData={compositionData}
       />
 
-      {/* Composition Modal for Placeholder Node */}
-      {compositionModalPlaceholderNodeId && (
+      {/* Composition Modal for Prompt Node */}
+      {compositionModalPromptNodeId && (
         <CompositionModal
           visible={compositionModalVisible}
           onClose={() => {
             setCompositionModalVisible(false);
-            setCompositionModalPlaceholderNodeId(null);
+            setCompositionModalPromptNodeId(null);
           }}
           onComplete={() => {
             setCompositionModalVisible(false);
-            setCompositionModalPlaceholderNodeId(null);
+            setCompositionModalPromptNodeId(null);
           }}
           initialPrompt={
-            compositionModalPlaceholderNodeId && currentGraphSession
+            compositionModalPromptNodeId && currentGraphSession
               ? currentGraphSession.nodes.find(
-                  (n) => n.id === compositionModalPlaceholderNodeId && n.type === "placeholder"
+                  (n) => n.id === compositionModalPromptNodeId && n.type === "prompt"
                 )?.data?.prompt || ""
               : ""
           }
-          placeholderNodeId={compositionModalPlaceholderNodeId}
+          placeholderNodeId={compositionModalPromptNodeId}
         />
       )}
 
