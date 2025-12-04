@@ -329,6 +329,14 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
     }
   }, [visible, initialPrompt]);
 
+  // 모달이 열릴 때 프롬프트가 있으면 자동으로 객체 리스트 생성
+  React.useEffect(() => {
+    if (visible && initialPrompt && initialPrompt.trim().length > 0) {
+      // 모달이 열리고 프롬프트가 있으면 자동으로 객체 리스트 생성
+      handleSendPrompt(initialPrompt);
+    }
+  }, [visible]); // initialPrompt는 의존성에 포함하지 않음 (한 번만 실행되도록)
+
   // 모달이 닫힐 때 모든 temporary data 초기화
   React.useEffect(() => {
     if (!visible) {

@@ -2405,6 +2405,144 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       if (createdPromptNodeId) {
         selectNode(createdPromptNodeId);
         console.log("[GraphCanvas] 생성된 노드 선택:", createdPromptNodeId);
+
+        // 첫 이미지를 자동으로 생성하기 위해 Next Step 실행
+        // 상태 업데이트를 기다리기 위해 약간의 딜레이 후 실행
+        setTimeout(async () => {
+          try {
+            const { addImageNode, addLoadingNode, removeLoadingNode } =
+              useImageStore.getState();
+            
+            // 최신 상태 가져오기
+            const updatedSession = useImageStore.getState().currentGraphSession;
+            if (!updatedSession) return;
+
+            // Prompt node 찾기
+            const promptNode = updatedSession.nodes.find((n) => n.id === createdPromptNodeId);
+            if (!promptNode) return;
+
+            // Get unique branch ID for the prompt node
+            const uniqueBranchId = createUniqueBranchId(sessionId, activeBranchId);
+            const backendBranchId = extractBackendBranchId(uniqueBranchId);
+            const isMainBranch = backendBranchId === "B0";
+
+            // Calculate position for first image (step 1 or stepInterval)
+            const firstPreviewStep = stepInterval; // 첫 번째 프리뷰는 stepInterval 단계에서
+            const graphSessionId = updatedSession.id;
+            
+            // Find the prompt node for offset calculation
+            const promptNodeForOffset = updatedSession.nodes.find((n) => 
+              n.type === "prompt" && n.id === createdPromptNodeId
+            );
+            const promptNodeIdForOffset = promptNodeForOffset?.id || null;
+            
+            // Add loading node
+            const rowIndex = isMainBranch 
+              ? (promptNodeForOffset?.data?.rowIndex ?? 0)
+              : getBranchRowIndexLocal(uniqueBranchId);
+            const pos = calculatePositionWithOffset(firstPreviewStep, rowIndex, promptNodeIdForOffset, uniqueBranchId);
+            const loadingNodeId = addLoadingNode(graphSessionId, createdPromptNodeId, firstPreviewStep, pos, uniqueBranchId);
+
+            // Run steps until we reach the first preview step
+            let lastResp: Awaited<ReturnType<typeof stepOnce>> | null = null;
+            const maxIterations = 50;
+            let iterations = 0;
+
+            while (iterations < maxIterations) {
+              const resp = await stepOnce({
+                session_id: sessionId,
+                branch_id: backendBranchId,
+              });
+              lastResp = resp;
+              iterations++;
+
+              console.log(`[GraphCanvas] Auto Step iteration ${iterations}: backend now at step ${resp.i}, target preview step=${firstPreviewStep}`);
+
+              // Check if we've reached the end
+              if (resp.i >= resp.num_steps) {
+                console.log(`[GraphCanvas] Reached end at step ${resp.i}/${resp.num_steps}`);
+                if (loadingNodeId) {
+                  removeLoadingNode(graphSessionId, loadingNodeId);
+                }
+                break;
+              }
+
+              // Check if we've reached the first preview step
+              if (resp.i >= firstPreviewStep) {
+                console.log(`[GraphCanvas] Reached first preview step ${resp.i} (target was ${firstPreviewStep})`);
+                break;
+              }
+            }
+
+            // Add preview image
+            if (lastResp?.preview_png_base64) {
+              const gsAfterStep = useImageStore.getState().currentGraphSession;
+              if (!gsAfterStep) return;
+
+              const currentGsId = gsAfterStep.id;
+              const promptNodeAfter = gsAfterStep.nodes.find((n) => 
+                n.type === "prompt" && n.id === createdPromptNodeId
+              );
+              const promptNodeIdAfter = promptNodeAfter?.id || null;
+
+              // Find the last node in this branch (should be none, so use prompt node)
+              const branchImageNodes = gsAfterStep.nodes.filter((n) => {
+                if (n.type !== "image") return false;
+                const nodeBranchId = getNodeBranchId(n.id);
+                return nodeBranchId === uniqueBranchId;
+              });
+              const lastBranchNode = branchImageNodes
+                .slice()
+                .sort((a, b) => (a.data?.step || 0) - (b.data?.step || 0))
+                .pop();
+              const parentNodeId = lastBranchNode?.id || promptNodeIdAfter || createdPromptNodeId;
+
+              if (parentNodeId) {
+                const rowIndexAfter = isMainBranch 
+                  ? (promptNodeAfter?.data?.rowIndex ?? 0)
+                  : getBranchRowIndexLocal(uniqueBranchId);
+                const actualStep = lastResp.i;
+                const posAfter = calculatePositionWithOffset(actualStep, rowIndexAfter, promptNodeIdAfter, uniqueBranchId);
+
+                console.log(`[GraphCanvas] Adding first image node: step=${actualStep}, uniqueBranchId=${uniqueBranchId}`);
+
+                // If loading node step doesn't match the actual step from backend, remove loading node first
+                if (loadingNodeId && actualStep !== firstPreviewStep) {
+                  console.warn(`[GraphCanvas] Step mismatch: loading node at ${firstPreviewStep}, backend returned ${actualStep}. Removing loading node.`);
+                  removeLoadingNode(currentGsId, loadingNodeId);
+                }
+
+                addImageNode(currentGsId, parentNodeId, lastResp.preview_png_base64, actualStep, posAfter, undefined, uniqueBranchId);
+
+                // Ensure loading node is removed if it still exists
+                if (loadingNodeId) {
+                  const stateAfterAdd = useImageStore.getState().currentGraphSession;
+                  const loadingStillExists = stateAfterAdd?.nodes.some((n) => n.id === loadingNodeId && n.type === "loading");
+                  if (loadingStillExists) {
+                    console.warn(`[GraphCanvas] Loading node ${loadingNodeId} still exists after addImageNode, removing it`);
+                    removeLoadingNode(currentGsId, loadingNodeId);
+                  }
+                }
+
+                // Select the newly created image node
+                const newImageNode = useImageStore.getState().currentGraphSession?.nodes.find(
+                  (n) => n.type === "image" && n.data?.step === actualStep && getNodeBranchId(n.id) === uniqueBranchId
+                );
+                if (newImageNode) {
+                  selectNode(newImageNode.id);
+                  console.log("[GraphCanvas] 첫 이미지 노드 선택:", newImageNode.id);
+                }
+              }
+            } else if (loadingNodeId) {
+              // Remove loading node if no preview was generated
+              const gs = useImageStore.getState().currentGraphSession;
+              const currentGsId = gs?.id || graphSessionId;
+              removeLoadingNode(currentGsId, loadingNodeId);
+            }
+          } catch (error) {
+            console.error("[GraphCanvas] 자동 첫 이미지 생성 실패:", error);
+          }
+        }, 100); // 100ms 딜레이로 상태 업데이트 대기
       }
     } catch (error) {
       console.error("[GraphCanvas] 바로 생성 실패:", error);
@@ -2414,7 +2552,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         }`
       );
     }
-  }, [currentGraphSession, addPromptNodeToGraph, registerParallelSession, createGraphSession, selectNode]);
+  }, [currentGraphSession, addPromptNodeToGraph, registerParallelSession, createGraphSession, selectNode, stepInterval, getNodeBranchId, getBranchRowIndexLocal, calculatePositionWithOffset]);
 
   // currentGraphSession이 없으면 빈 세션을 생성하므로 여기서는 항상 세션이 존재함
   // EmptyState는 더 이상 필요하지 않음
