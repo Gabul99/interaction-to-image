@@ -400,7 +400,15 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
 
     try {
       // 선택된 모드에 따라 하나만 전송
-      let bboxes = undefined;
+      let bboxes:
+        | Array<{
+            objectId: string;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+          }>
+        | undefined = undefined;
       let sketchImageFile: File | null = null;
 
       if (compositionMode === "bbox" && compositionState.bboxes.length > 0) {
@@ -463,6 +471,9 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
             })
           : undefined;
 
+      const useSketchEdge =
+        compositionMode === "sketch" && !!sketchImageFile && sketchLayers.length > 0;
+
       const startResp = await startSession({
         prompt: currentPrompt,
         steps: 50,
@@ -473,6 +484,10 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
         enable_layout:
           compositionMode === "bbox" && (layoutItems?.length || 0) > 0,
         layout_items: layoutItems,
+        // 스케치 모드일 때는 edge guidance 활성화 및 스케치 이미지를 edge_files로 전송
+        enable_edge: useSketchEdge,
+        edge_phrases_text: useSketchEdge ? currentPrompt : undefined,
+        edge_files: useSketchEdge && sketchImageFile ? [sketchImageFile] : undefined,
       });
 
       const sessionId = startResp.session_id;

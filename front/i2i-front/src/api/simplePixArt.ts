@@ -36,7 +36,7 @@ export async function generateSimpleImages(
     width: params.width ?? 512,
     height: params.height ?? 512,
     guidance_scale: params.guidance_scale ?? 4.5,
-    num_inference_steps: params.num_inference_steps ?? 20,
+    num_inference_steps: params.num_inference_steps ?? 50,
   };
 
   const res = await fetch(`${SIMPLE_PIXART_API_BASE_URL}/generate`, {
@@ -88,7 +88,7 @@ export async function generateWithImage(
   form.append("guidance_scale", String(params.guidance_scale ?? 4.5));
   form.append(
     "num_inference_steps",
-    String(params.num_inference_steps ?? 20)
+    String(params.num_inference_steps ?? 50)
   );
 
   // Convert data URL to Blob via fetch (works in browser)

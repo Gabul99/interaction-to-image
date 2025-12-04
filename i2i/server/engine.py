@@ -416,7 +416,7 @@ def start_session_engine(
         "object_edge_maps": object_edge_maps,
         "edge_phrases": edge_phrases,
         "edge_phrases_idx": edge_phrases_idx,
-        "edge_guidance_scale": 2.0,
+        "edge_guidance_scale": 1.0,
         "edge_preprocessor": "hed",
         "layout_intervals": [(0, min(steps - 1, 25))],
         "edge_intervals": [(0, min(steps - 1, 30))],
