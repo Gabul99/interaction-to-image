@@ -166,7 +166,7 @@ async def start_session(
                     layout_items = parsed
             except Exception:
                 layout_items = None
-
+        print(edge_files)
         # Load edge images (if any)
         edge_images: Optional[List[Image.Image]] = None
         if edge_files:
@@ -228,6 +228,8 @@ async def start_image_generation(request: Request, sketch: UploadFile | None = F
     height: int = 512
     num_inference_steps: int = 50
     layout_items: Optional[List[Dict[str, Any]]] = None
+    edge_images: Optional[List[Image.Image]] = None
+    enable_edge: bool = False
 
     try:
         if "multipart/form-data" in content_type:
@@ -275,6 +277,16 @@ async def start_image_generation(request: Request, sketch: UploadFile | None = F
                             })
             except Exception:
                 layout_items = None
+            # Handle optional sketch file as edge image
+            if sketch is not None:
+                try:
+                    data = await sketch.read()
+                    img = Image.open(io.BytesIO(data)).convert("RGB")
+                    edge_images = [img]
+                    enable_edge = True
+                except Exception:
+                    edge_images = None
+                    enable_edge = False
         else:
             body = await request.json()
             prompt = str(body.get("prompt") or "").strip()
@@ -329,9 +341,10 @@ async def start_image_generation(request: Request, sketch: UploadFile | None = F
             guidance_scale=4.5,
             enable_layout=bool(layout_items and len(layout_items) > 0),
             layout_items=layout_items,
-            enable_edge=False,
-            edge_images=None,
-            edge_phrases_text=None,
+            enable_edge=enable_edge,
+            edge_images=edge_images,
+            # For now, use the whole prompt as a single phrase for edge guidance when sketch is provided
+            edge_phrases_text=prompt if enable_edge else None,
         )
         session_id = uuid.uuid4().hex
         SESSIONS[session_id] = state

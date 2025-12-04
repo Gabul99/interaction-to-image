@@ -187,7 +187,7 @@ class GenerateResponse(BaseModel):
     )
     image_caption: Optional[str] = Field(
         None,
-        description="If an image was provided, the GPT-generated caption used for prompt composition.",
+        description="If one or more images were provided, the GPT-generated caption(s) used for prompt composition.",
     )
 
 
@@ -333,16 +333,38 @@ def _caption_image_with_gpt(
     return text.strip()
 
 
+def _caption_images_with_gpt(
+    image_bytes_list: List[bytes],
+    hint_prompt: Optional[str] = None,
+) -> str:
+    """
+    Use a GPT vision-capable model to produce a combined caption / prompt-like description
+    for multiple images.
+
+    This is a simple wrapper that calls `_caption_image_with_gpt` for each image and
+    concatenates the captions into a single description.
+    """
+    captions: List[str] = []
+    for image_bytes in image_bytes_list:
+        captions.append(
+            _caption_image_with_gpt(
+                image_bytes=image_bytes,
+                hint_prompt=hint_prompt,
+            )
+        )
+    return "\n\n".join(captions).strip()
+
+
 def _build_final_prompt(
     current_prompt: str,
     previous_prompt: Optional[str],
-    image_bytes: Optional[bytes],
+    image_bytes_list: Optional[List[bytes]],
 ) -> Tuple[str, Optional[str]]:
     """
     Build the final generation prompt according to the rules:
 
-    - If image is provided:
-        1) Generate an image caption with GPT.
+    - If one or more images are provided:
+        1) Generate image caption(s) with GPT.
         2) Compose a full prompt from caption + (previous + current) using GPT.
     - Else if previous prompt is provided:
         1) Compose full prompt from previous + current using GPT.
@@ -354,9 +376,9 @@ def _build_final_prompt(
     """
     # With GPT
     try:
-        if image_bytes is not None:
-            # Caption the image first
-            caption = _caption_image_with_gpt(image_bytes, hint_prompt=None)
+        if image_bytes_list:
+            # Caption the image(s) first
+            caption = _caption_images_with_gpt(image_bytes_list, hint_prompt=None)
 
             # Compose full prompt from caption + text context
             text_context_parts = []
@@ -418,6 +440,7 @@ def generate_pil_images(
     used_seed = randomize_seed(seed)
     generator = torch.Generator(device=pipeline.device).manual_seed(used_seed)
 
+    print(f"num_inference_steps: {num_inference_steps}")
     result = pipeline(
         prompt=prompt,
         width=width,
@@ -505,7 +528,7 @@ def generate_endpoint(request: GenerateRequest):
         final_prompt, _ = _build_final_prompt(
             current_prompt=request.prompt,
             previous_prompt=request.previous_prompt,
-            image_bytes=None,
+            image_bytes_list=None,
         )
 
         images, used_seed = generate_pil_images(
@@ -545,6 +568,10 @@ async def generate_with_image_endpoint(
     image: Optional[UploadFile] = File(
         None, description="Optional reference image used to derive a caption/prompt."
     ),
+    images: Optional[List[UploadFile]] = File(
+        None,
+        description="Optional list of reference images used to derive a caption/prompt.",
+    ),
 ):
     """
     Extended generation endpoint that optionally accepts an image.
@@ -564,14 +591,18 @@ async def generate_with_image_endpoint(
         )
 
     try:
-        image_bytes: Optional[bytes] = None
+        image_bytes_list: List[bytes] = []
         if image is not None:
-            image_bytes = await image.read()
+            image_bytes_list.append(await image.read())
+        if images is not None:
+            for upload_file in images:
+                if upload_file is not None:
+                    image_bytes_list.append(await upload_file.read())
 
         final_prompt, caption = _build_final_prompt(
             current_prompt=current_prompt,
             previous_prompt=previous_prompt,
-            image_bytes=image_bytes,
+            image_bytes_list=image_bytes_list or None,
         )
         print(f"Caption: {caption}")
         print(f"Final prompt: {final_prompt}")
