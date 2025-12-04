@@ -283,12 +283,16 @@ interface CompositionModalProps {
   visible: boolean;
   onClose: () => void;
   onComplete?: () => void;
+  initialPrompt?: string;
+  placeholderNodeId?: string | null;
 }
 
 const CompositionModal: React.FC<CompositionModalProps> = ({
   visible,
   onClose,
   onComplete,
+  initialPrompt = "",
+  placeholderNodeId = null,
 }) => {
   const {
     compositionState,
@@ -304,9 +308,10 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
     currentGraphSession,
     addPromptNodeToGraph,
     registerParallelSession,
+    updatePlaceholderNodePrompt,
   } = useImageStore();
 
-  const [currentPrompt, setCurrentPrompt] = useState<string>("");
+  const [currentPrompt, setCurrentPrompt] = useState<string>(initialPrompt);
   const [isLoadingObjects, setIsLoadingObjects] = useState(false);
   const [toolMode, setToolMode] = useState<ToolMode>("select");
   const [selectedBboxId, setSelectedBboxId] = useState<string | null>(null);
@@ -317,10 +322,20 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
   const imageRef = React.useRef<HTMLImageElement>(null);
   const placeholderRef = React.useRef<HTMLDivElement>(null);
 
+  // initialPrompt가 변경되면 currentPrompt 업데이트
+  React.useEffect(() => {
+    if (visible && initialPrompt) {
+      setCurrentPrompt(initialPrompt);
+    }
+  }, [visible, initialPrompt]);
+
   // 모달이 닫힐 때 모든 temporary data 초기화
   React.useEffect(() => {
     if (!visible) {
-      setCurrentPrompt("");
+      // initialPrompt가 있으면 유지, 없으면 초기화
+      if (!initialPrompt) {
+        setCurrentPrompt("");
+      }
       setCompositionMode(null);
       setSketchLayers([]);
       setToolMode("select");
@@ -328,7 +343,7 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
       setIsLoadingObjects(false);
       clearComposition();
     }
-  }, [visible, clearComposition]);
+  }, [visible, clearComposition, initialPrompt]);
 
   const handleSendPrompt = async (newPrompt: string) => {
     console.log("=".repeat(80));
@@ -452,14 +467,21 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
         // Add new prompt node to existing graph session (parallel session)
         console.log("[CompositionModal] Adding parallel session to existing graph");
         
-        // Find any existing placeholder node to convert
-        const placeholderNode = currentGraphSession.nodes.find(
-          (n) => n.type === "placeholder"
-        );
-        const placeholderNodeId = placeholderNode?.id;
+        // Use the placeholderNodeId from props if available, otherwise find any placeholder node
+        let targetPlaceholderNodeId = placeholderNodeId;
+        if (!targetPlaceholderNodeId) {
+          const placeholderNode = currentGraphSession.nodes.find(
+            (n) => n.type === "placeholder"
+          );
+          targetPlaceholderNodeId = placeholderNode?.id || undefined;
+        }
         
-        if (placeholderNodeId) {
-          console.log("[CompositionModal] Found placeholder node to convert:", placeholderNodeId);
+        const placeholderNode = targetPlaceholderNodeId
+          ? currentGraphSession.nodes.find((n) => n.id === targetPlaceholderNodeId)
+          : null;
+        
+        if (targetPlaceholderNodeId) {
+          console.log("[CompositionModal] Found placeholder node to convert:", targetPlaceholderNodeId);
         }
         
         const promptNodeId = addPromptNodeToGraph(
@@ -473,7 +495,7 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
             ? sketchLayers
             : undefined,
           placeholderNode?.position, // Use placeholder position if available
-          placeholderNodeId // Pass placeholder node ID to convert it
+          targetPlaceholderNodeId // Pass placeholder node ID to convert it
         );
         
         if (promptNodeId) {
@@ -573,7 +595,14 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
                 type="text"
                 placeholder="이미지 생성을 위한 프롬프트를 입력하세요..."
                 value={currentPrompt}
-                onChange={(e) => setCurrentPrompt(e.target.value)}
+                onChange={(e) => {
+                  const newPrompt = e.target.value;
+                  setCurrentPrompt(newPrompt);
+                  // Placeholder node의 프롬프트도 실시간으로 업데이트
+                  if (placeholderNodeId && currentGraphSession) {
+                    updatePlaceholderNodePrompt(currentGraphSession.id, placeholderNodeId, newPrompt);
+                  }
+                }}
                 disabled={isLoadingObjects}
               />
               <SendPromptButton

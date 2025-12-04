@@ -356,6 +356,11 @@ export interface ImageStreamState {
     nodeId: string,
     position: { x: number; y: number }
   ) => void;
+  updatePlaceholderNodePrompt: (
+    sessionId: string,
+    nodeId: string,
+    prompt: string
+  ) => void;
   addEdge: (
     sessionId: string,
     source: string,
@@ -2472,6 +2477,32 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
         ...state.currentGraphSession,
         nodes: state.currentGraphSession.nodes.map((node) =>
           node.id === nodeId ? { ...node, position } : node
+        ),
+      },
+    });
+  },
+
+  // Placeholder 노드 프롬프트 업데이트
+  updatePlaceholderNodePrompt: (
+    sessionId: string,
+    nodeId: string,
+    prompt: string
+  ) => {
+    const state = get();
+    if (
+      !state.currentGraphSession ||
+      state.currentGraphSession.id !== sessionId
+    ) {
+      return;
+    }
+
+    set({
+      currentGraphSession: {
+        ...state.currentGraphSession,
+        nodes: state.currentGraphSession.nodes.map((node) =>
+          node.id === nodeId && node.type === "placeholder"
+            ? { ...node, data: { ...node.data, prompt } }
+            : node
         ),
       },
     });
