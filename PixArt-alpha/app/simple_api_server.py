@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -189,6 +191,14 @@ class GenerateResponse(BaseModel):
         None,
         description="If one or more images were provided, the GPT-generated caption(s) used for prompt composition.",
     )
+
+
+class SaveSessionReq(BaseModel):
+    """Request model for saving a graph session."""
+    mode: str = Field(..., description="Mode string (e.g., 'step' or 'prompt')")
+    participant: int = Field(..., description="Participant number")
+    graphSession: Dict[str, Any] = Field(..., description="GraphSession data to save")
+    bookmarkedNodeIds: Optional[List[str]] = Field(default=[], description="Array of bookmarked node IDs")
 
 
 # =============================================================================
@@ -629,6 +639,87 @@ async def generate_with_image_endpoint(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+
+# =============================================================================
+# Session save/load endpoints
+# =============================================================================
+
+def _get_logs_dir() -> Path:
+    """Get the logs directory path."""
+    logs_dir = Path(os.environ.get("I2I_LOGS_DIR", "logs"))
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return logs_dir
+
+
+@app.post("/api/session/save")
+async def save_session(req: SaveSessionReq):
+    """
+    Save a graph session to disk.
+    Saves to: logs/{mode}/p{participant}/session_{timestamp}.json
+    """
+    try:
+        logs_dir = _get_logs_dir()
+        mode_dir = logs_dir / req.mode
+        participant_dir = mode_dir / f"p{req.participant}"
+        participant_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate timestamp for filename
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        filename = f"session_{timestamp}.json"
+        filepath = participant_dir / filename
+        
+        # Prepare data with lastUpdated timestamp
+        data = {
+            "graphSession": req.graphSession,
+            "lastUpdated": datetime.now().isoformat() + "Z",
+            "bookmarkedNodeIds": req.bookmarkedNodeIds or [],
+        }
+        
+        # Write to file
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        
+        return {
+            "status": "ok",
+            "message": f"Session saved to {filepath}",
+            "filepath": str(filepath),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save session: {str(e)}")
+
+
+@app.get("/api/session/load")
+async def load_session(mode: str, p: int):
+    """
+    Load the latest graph session from disk.
+    Returns the most recent session file for the given mode and participant.
+    """
+    try:
+        logs_dir = _get_logs_dir()
+        participant_dir = logs_dir / mode / f"p{p}"
+        
+        if not participant_dir.exists():
+            raise HTTPException(status_code=404, detail="No sessions found")
+        
+        # Find all session files and get the most recent one
+        session_files = list(participant_dir.glob("session_*.json"))
+        if not session_files:
+            raise HTTPException(status_code=404, detail="No sessions found")
+        
+        # Sort by modification time (most recent first)
+        session_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        latest_file = session_files[0]
+        
+        # Read and return the session data
+        with open(latest_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load session: {str(e)}")
 
 
 if __name__ == "__main__":

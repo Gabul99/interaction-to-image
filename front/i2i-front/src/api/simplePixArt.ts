@@ -1,4 +1,5 @@
 import { API_BASE_URL } from "../config/api";
+import type { GraphSession } from "../types";
 
 export interface SimpleGenerateRequest {
   prompt: string;
@@ -140,5 +141,58 @@ export async function generateWithImage(
   }
 
   return data;
+}
+
+/**
+ * Save a graph session to the server (for prompt mode)
+ * @param mode - Mode string ("step" or "prompt")
+ * @param participant - Participant number
+ * @param graphSession - GraphSession to save
+ * @param bookmarkedNodeIds - Array of bookmarked node IDs
+ */
+export async function saveSession(
+  mode: string,
+  participant: number,
+  graphSession: GraphSession,
+  bookmarkedNodeIds?: string[]
+): Promise<{ status: string; message?: string }> {
+  const res = await fetch(`${SIMPLE_PIXART_API_BASE_URL}/api/session/save`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode,
+      participant,
+      graphSession,
+      bookmarkedNodeIds: bookmarkedNodeIds || [],
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`saveSession failed: ${res.status}`);
+  }
+  return await res.json();
+}
+
+/**
+ * Load the latest graph session from the server (for prompt mode)
+ * @param mode - Mode string ("step" or "prompt")
+ * @param participant - Participant number
+ * @returns GraphSession data with lastUpdated timestamp and bookmarkedNodeIds, or null if not found
+ */
+export async function loadSession(
+  mode: string,
+  participant: number
+): Promise<{ graphSession: GraphSession; lastUpdated: string; bookmarkedNodeIds?: string[] } | null> {
+  const url = `${SIMPLE_PIXART_API_BASE_URL}/api/session/load?mode=${encodeURIComponent(mode)}&p=${encodeURIComponent(participant)}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) {
+    if (res.status === 404) {
+      return null; // No session found
+    }
+    throw new Error(`loadSession failed: ${res.status}`);
+  }
+  return await res.json();
 }
 

@@ -340,11 +340,15 @@ const SettingsInput = styled.input`
 interface GraphCanvasProps {
   className?: string;
   onAddNodeClick?: () => void;
+  mode?: string;
+  participant?: number | null;
 }
 
 const GraphCanvas: React.FC<GraphCanvasProps> = ({
   className,
   onAddNodeClick,
+  mode,
+  participant,
 }) => {
   const {
     currentGraphSession,
@@ -360,6 +364,9 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     removeImageNodesAfterPrompt,
     registerParallelSession,
     createGraphSession,
+    loadSessionFromServer,
+    saveSessionToServer,
+    bookmarkedNodeIds,
   } = useImageStore();
   const [branchingModalVisible, setBranchingModalVisible] = useState(false);
   const [branchingNodeId, setBranchingNodeId] = useState<string | null>(null);
@@ -402,12 +409,57 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     childStartPositions: Map<string, { x: number; y: number }>;
   } | null>(null);
 
-  // 초기 렌더링 시 빈 GraphSession 생성
+  // 초기 렌더링 시 세션 로드 또는 빈 GraphSession 생성
   useEffect(() => {
     if (!currentGraphSession) {
-      initializeEmptyGraphSession();
+      // participant가 있으면 서버에서 로드 시도
+      if (participant !== null && participant !== undefined && mode) {
+        loadSessionFromServer(mode, participant)
+          .then(() => {
+            // 로드 성공 후에도 currentGraphSession이 없으면 빈 세션 초기화
+            const state = useImageStore.getState();
+            if (!state.currentGraphSession) {
+              console.log("[GraphCanvas] No session loaded, initializing empty");
+              initializeEmptyGraphSession();
+            }
+          })
+          .catch((error) => {
+            console.warn("[GraphCanvas] Failed to load session, initializing empty:", error);
+            initializeEmptyGraphSession();
+          });
+      } else {
+        initializeEmptyGraphSession();
+      }
     }
   }, []); // 최초 한 번만 실행
+
+  // currentGraphSession 또는 bookmarkedNodeIds 변경 시 자동 저장 (debounce 적용)
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  useEffect(() => {
+    // participant가 없거나 mode가 없으면 저장하지 않음
+    if (!participant || !mode || !currentGraphSession) {
+      return;
+    }
+
+    // 이전 타이머 취소
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    // 10초 후에 저장 (debounce)
+    saveTimeoutRef.current = setTimeout(() => {
+      saveSessionToServer(mode, participant).catch((error) => {
+        console.error("[GraphCanvas] Failed to auto-save session:", error);
+      });
+    }, 10000);
+
+    // cleanup
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [currentGraphSession, bookmarkedNodeIds, mode, participant, saveSessionToServer]);
   
   // Backtracking state
   const [isBacktracking, setIsBacktracking] = useState(false);
