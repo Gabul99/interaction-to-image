@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useImageStore } from "../stores/imageStore";
 import ReactFlow, {
   Background,
   Controls,
@@ -18,12 +19,13 @@ import SimpleImageNode from "./SimpleImageNode";
 import SimpleLoadingNode from "./SimpleLoadingNode";
 import SimplePromptNode, { type SimplePromptNodeData } from "./SimplePromptNode";
 import BookmarkPanel from "./BookmarkPanel";
-import { useImageStore } from "../stores/imageStore";
 import {
   generateSimpleImages,
   generateWithImage,
   type SimpleGenerateResponse,
+  saveSession,
 } from "../api/simplePixArt";
+import type { GraphSession, GraphNode, GraphEdge } from "../types";
 
 const CanvasContainer = styled.div`
   width: 100%;
@@ -104,7 +106,85 @@ const nodeTypes: NodeTypes = {
   loading: SimpleLoadingNode,
 };
 
-const SimpleGraphCanvas: React.FC = () => {
+interface SimpleGraphCanvasProps {
+  mode?: string;
+  participant?: number | null;
+}
+
+// Helper functions to convert between SimpleGraphCanvas nodes/edges and GraphSession
+const convertNodesToGraphSession = (
+  nodes: Node<SimpleNodeData>[],
+  edges: Edge[],
+  sessionId: string = "simple-session"
+): GraphSession => {
+  const graphNodes: GraphNode[] = nodes.map((node) => ({
+    id: node.id,
+    type: node.type as 'prompt' | 'image' | 'placeholder' | 'loading',
+    data: {
+      prompt: (node.data as SimplePromptNodeData)?.prompt,
+      imageUrl: (node.data as { imageUrl?: string })?.imageUrl,
+      step: (node.data as { step?: number })?.step,
+    },
+    position: node.position,
+  }));
+
+  const graphEdges: GraphEdge[] = edges.map((edge) => ({
+    id: edge.id,
+    source: edge.source,
+    target: edge.target,
+    type: edge.type as 'default' | 'branch' | undefined,
+  }));
+
+  return {
+    id: sessionId,
+    nodes: graphNodes,
+    edges: graphEdges,
+    branches: [], // SimpleGraphCanvas doesn't use branches
+  };
+};
+
+const convertGraphSessionToNodes = (
+  graphSession: GraphSession
+): { nodes: Node<SimpleNodeData>[]; edges: Edge[] } => {
+  const nodes: Node<SimpleNodeData>[] = graphSession.nodes.map((gn) => {
+    const nodeData: SimpleNodeData = 
+      gn.type === 'prompt'
+        ? {
+            prompt: gn.data?.prompt || '',
+            inputImagePreviewUrls: [],
+            inputImageDataUrls: [],
+            inputImageSourceNodeIds: [],
+            onUploadImages: () => {},
+            onRemoveInputImage: () => {},
+            onChangePrompt: () => {},
+          }
+        : gn.type === 'image'
+        ? {
+            imageUrl: gn.data?.imageUrl,
+            step: gn.data?.step,
+          }
+        : {};
+
+    return {
+      id: gn.id,
+      type: gn.type,
+      data: nodeData,
+      position: gn.position,
+    };
+  });
+
+  const edges: Edge[] = graphSession.edges.map((ge) => ({
+    id: ge.id,
+    source: ge.source,
+    target: ge.target,
+    type: ge.type,
+  }));
+
+  return { nodes, edges };
+};
+
+const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant }) => {
+  const { loadSessionFromServer, bookmarkedNodeIds } = useImageStore();
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nodes, setNodes, onNodesChange] =
@@ -271,16 +351,100 @@ const SimpleGraphCanvas: React.FC = () => {
     [setNodes, setEdges]
   );
 
-  // Initialize with a single prompt node
+  // Initialize with a single prompt node or load from server
   useEffect(() => {
     if (nodes.length === 0) {
-      const initialId = "prompt-1";
-      const initialNode = createPromptNode(initialId, { x: 0, y: 0 });
-      setNodes([initialNode]);
-      setActivePromptId(initialId);
-      setNextPromptIndex(2);
+      // participant가 있으면 서버에서 로드 시도
+      if (participant !== null && participant !== undefined && mode) {
+        loadSessionFromServer(mode, participant)
+          .then(() => {
+            const { currentGraphSession } = useImageStore.getState();
+            if (currentGraphSession) {
+              // GraphSession을 nodes/edges로 변환
+              const { nodes: loadedNodes, edges: loadedEdges } = convertGraphSessionToNodes(currentGraphSession);
+              setNodes(loadedNodes);
+              setEdges(loadedEdges);
+              
+              // activePromptId 찾기
+              const firstPromptNode = loadedNodes.find(n => n.type === 'prompt');
+              if (firstPromptNode) {
+                setActivePromptId(firstPromptNode.id);
+                // nextPromptIndex 계산
+                const promptNodes = loadedNodes.filter(n => n.type === 'prompt');
+                const maxIndex = Math.max(...promptNodes.map(n => {
+                  const match = n.id.match(/prompt-(\d+)/);
+                  return match ? parseInt(match[1], 10) : 0;
+                }));
+                setNextPromptIndex(maxIndex + 1);
+              }
+              console.log("[SimpleGraphCanvas] Session loaded and converted to nodes/edges");
+            } else {
+              // 로드된 세션이 없으면 기본 노드 생성
+              const initialId = "prompt-1";
+              const initialNode = createPromptNode(initialId, { x: 0, y: 0 });
+              setNodes([initialNode]);
+              setActivePromptId(initialId);
+              setNextPromptIndex(2);
+            }
+          })
+          .catch((error) => {
+            console.warn("[SimpleGraphCanvas] Failed to load session, initializing default:", error);
+            // 로드 실패 시 기본 노드 생성
+            const initialId = "prompt-1";
+            const initialNode = createPromptNode(initialId, { x: 0, y: 0 });
+            setNodes([initialNode]);
+            setActivePromptId(initialId);
+            setNextPromptIndex(2);
+          });
+      } else {
+        // participant가 없으면 기본 노드 생성
+        const initialId = "prompt-1";
+        const initialNode = createPromptNode(initialId, { x: 0, y: 0 });
+        setNodes([initialNode]);
+        setActivePromptId(initialId);
+        setNextPromptIndex(2);
+      }
     }
-  }, [nodes.length, createPromptNode]);
+  }, [nodes.length, createPromptNode, mode, participant, loadSessionFromServer, setNodes, setEdges]);
+
+  // nodes/edges 변경 시 자동 저장 (debounce 적용)
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  useEffect(() => {
+    // participant가 없거나 mode가 없으면 저장하지 않음
+    if (!participant || !mode || nodes.length === 0) {
+      return;
+    }
+
+    // 이전 타이머 취소
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    // 10초 후에 저장 (debounce)
+    saveTimeoutRef.current = setTimeout(() => {
+      if (mode === "prompt" && participant) {
+        // GraphSession으로 변환하여 직접 저장
+        const graphSession = convertNodesToGraphSession(nodes, edges, `simple-${participant}`);
+        const { bookmarkedNodeIds } = useImageStore.getState();
+        
+        // saveSession API를 직접 호출
+        saveSession(mode, participant, graphSession, bookmarkedNodeIds)
+          .then(() => {
+            console.log("[SimpleGraphCanvas] Session auto-saved");
+          })
+          .catch((error) => {
+            console.error("[SimpleGraphCanvas] Failed to auto-save session:", error);
+          });
+      }
+    }, 10000);
+
+    // cleanup
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [nodes, edges, bookmarkedNodeIds, mode, participant]);
 
   const activePromptText = useMemo(() => {
     if (!activePromptId) return "";

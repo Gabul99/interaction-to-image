@@ -13,6 +13,8 @@ import {
 } from "../types";
 import { connectImageStream, disconnectImageStream } from "../api/websocket";
 import { USE_MOCK_MODE } from "../config/api";
+import { saveSession as saveSessionStep, loadSession as loadSessionStep } from "../lib/api";
+import { saveSession as saveSessionPrompt, loadSession as loadSessionPrompt } from "../api/simplePixArt";
 
 // Grid layout constants (must match GraphCanvas.tsx)
 const GRID_CELL_WIDTH = 80;
@@ -315,6 +317,9 @@ export interface ImageStreamState {
     bboxes?: BoundingBox[],
     sketchLayers?: SketchLayer[]
   ) => string;
+  // 세션 저장/로드
+  saveSessionToServer: (mode: string, participant: number) => Promise<void>;
+  loadSessionFromServer: (mode: string, participant: number) => Promise<void>;
   addPlaceholderNode: (
     sessionId: string,
     position: { x: number; y: number },
@@ -3331,5 +3336,59 @@ export const useImageStore = create<ImageStreamState>((set, get) => ({
   isBookmarked: (nodeId: string) => {
     const state = get();
     return state.bookmarkedNodeIds.includes(nodeId);
+  },
+  
+  // 세션 저장/로드
+  saveSessionToServer: async (mode: string, participant: number) => {
+    const state = get();
+    if (!state.currentGraphSession) {
+      console.warn("[ImageStore] No currentGraphSession to save");
+      return;
+    }
+    
+    try {
+      console.log(`[ImageStore] Saving session: mode=${mode}, participant=${participant}, bookmarkedNodeIds=${JSON.stringify(state.bookmarkedNodeIds)}`);
+      if (mode === "prompt") {
+        await saveSessionPrompt(mode, participant, state.currentGraphSession, state.bookmarkedNodeIds);
+      } else {
+        await saveSessionStep(mode, participant, state.currentGraphSession, state.bookmarkedNodeIds);
+      }
+      console.log(`[ImageStore] Session saved: mode=${mode}, participant=${participant}`);
+    } catch (error) {
+      console.error("[ImageStore] Failed to save session:", error);
+      throw error;
+    }
+  },
+  
+  loadSessionFromServer: async (mode: string, participant: number) => {
+    try {
+      const result = mode === "prompt" 
+        ? await loadSessionPrompt(mode, participant)
+        : await loadSessionStep(mode, participant);
+      
+      if (!result) {
+        console.log(`[ImageStore] No session found: mode=${mode}, participant=${participant}`);
+        // null을 반환하면 빈 세션 초기화를 위해 에러를 throw하지 않고 그냥 return
+        // GraphCanvas에서 catch 후 initializeEmptyGraphSession을 호출하도록 함
+        return;
+      }
+      
+      const { graphSession, lastUpdated, bookmarkedNodeIds } = result;
+      console.log(`[ImageStore] Session loaded: mode=${mode}, participant=${participant}, lastUpdated=${lastUpdated}`);
+      
+      set({
+        currentGraphSession: graphSession,
+        bookmarkedNodeIds: bookmarkedNodeIds || [],
+      });
+    } catch (error) {
+      console.error("[ImageStore] Failed to load session:", error);
+      // 404 에러는 정상적인 경우이므로 throw하지 않고 return
+      // 다른 에러만 throw
+      if (error instanceof Error && error.message.includes("404")) {
+        console.log(`[ImageStore] Session not found (404), will initialize empty session`);
+        return;
+      }
+      throw error;
+    }
   },
 }));

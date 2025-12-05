@@ -24,12 +24,15 @@ const GraphContainer = styled.div`
 function App() {
   const [compositionModalVisible, setCompositionModalVisible] = useState(false);
 
-  // URL 쿼리 파라미터에서 mode 읽기 (기본값: step)
-  const mode = useMemo(() => {
+  // URL 쿼리 파라미터에서 mode와 participant 읽기
+  const { mode, participant } = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
     const modeParam = params.get("mode");
+    const participantParam = params.get("p");
     // mode=prompt면 베이스라인, mode=step이거나 없으면 기존 시스템
-    return modeParam === "prompt" ? "prompt" : "step";
+    const modeValue = modeParam === "prompt" ? "prompt" : "step";
+    const participantValue = participantParam ? parseInt(participantParam, 10) : null;
+    return { mode: modeValue, participant: participantValue };
   }, []);
 
   const handleAddNodeClick = () => {
@@ -47,7 +50,7 @@ function App() {
     return (
       <AppContainer>
         <GraphContainer>
-          <SimpleGraphCanvas />
+          <SimpleGraphCanvas mode={mode} participant={participant} />
         </GraphContainer>
       </AppContainer>
     );
@@ -57,7 +60,7 @@ function App() {
   return (
     <AppContainer>
       <GraphContainer>
-        <GraphCanvas onAddNodeClick={handleAddNodeClick} />
+        <GraphCanvas onAddNodeClick={handleAddNodeClick} mode={mode} participant={participant} />
       </GraphContainer>
       <CompositionModal
         visible={compositionModalVisible}
