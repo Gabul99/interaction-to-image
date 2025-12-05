@@ -368,8 +368,8 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const [isStepping, setIsStepping] = useState(false);
   const [isRunningToEnd, setIsRunningToEnd] = useState(false);
   
-  // Step interval for preview visualization (default: 5 = show every 5th step)
-  const [stepInterval, setStepInterval] = useState(5);
+  // Step interval for preview visualization (default: 4 = show every 4th step)
+  const [stepInterval, setStepInterval] = useState(4);
   
   // Pause control for Run to End - using ref so it can be checked synchronously in the loop
   const isPausedRef = useRef(false);
@@ -2403,11 +2403,15 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     try {
       console.log("[GraphCanvas] 구도 없이 바로 생성 시작:", prompt);
 
+      // 매 호출마다 새로운 랜덤 시드 생성 (재생성 버튼 포함)
+      const randomSeed = Math.floor(Math.random() * 1_000_000_000);
+      console.log("[GraphCanvas] Using random seed:", randomSeed);
+
       // 구도 설정 없이 바로 세션 시작
       const startResp = await startSession({
         prompt: prompt,
         steps: 50,
-        seed: 67,
+        seed: randomSeed,
         model_version: "512",
         gpu_id: 0,
         guidance_scale: 4.5,

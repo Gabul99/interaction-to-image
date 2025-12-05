@@ -474,10 +474,14 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
       const useSketchEdge =
         compositionMode === "sketch" && !!sketchImageFile && sketchLayers.length > 0;
 
+      // 매 호출마다 새로운 랜덤 시드 생성 (재생성 포함)
+      const randomSeed = Math.floor(Math.random() * 1_000_000_000);
+      console.log("[CompositionModal] Using random seed:", randomSeed);
+
       const startResp = await startSession({
         prompt: currentPrompt,
         steps: 50,
-        seed: 67,
+        seed: randomSeed,
         model_version: "512",
         gpu_id: 0,
         guidance_scale: 4.5,
