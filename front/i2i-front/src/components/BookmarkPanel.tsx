@@ -6,8 +6,8 @@ import { FaBookmark } from "react-icons/fa";
 const Panel = styled.div`
   position: absolute;
   left: 0;
-  top: 60px;
-  bottom: 80px;
+  top: 150px;
+  bottom: 150px;
   width: 200px;
   background: rgba(26, 26, 46, 0.95);
   backdrop-filter: blur(10px);
@@ -132,7 +132,7 @@ const BookmarkPlaceholder = styled.div`
 `;
 
 const EmptyState = styled.div`
-  padding: 24px;
+  padding-top: 24px;
   text-align: center;
   color: #9ca3af;
   font-size: 12px;
@@ -204,7 +204,7 @@ const BookmarkPanel: React.FC<BookmarkPanelProps> = ({ onNodeClick, nodes: exter
     <Panel>
       <PanelHeader>
         <PanelTitle>
-          🔖 북마크
+          Favorites
           {bookmarkedNodes.length > 0 && (
             <span style={{ color: "#9ca3af", fontSize: "12px", fontWeight: "normal" }}>
               ({bookmarkedNodes.length})
@@ -215,10 +215,10 @@ const BookmarkPanel: React.FC<BookmarkPanelProps> = ({ onNodeClick, nodes: exter
       <BookmarkList>
         {bookmarkedNodes.length === 0 ? (
           <EmptyState>
-            북마크한 이미지가 없습니다.
+            <span style={{ fontSize: "14px", fontWeight: "bold" }}>No bookmarked images.</span>
             <br />
             <span style={{ fontSize: "11px", opacity: 0.7 }}>
-              이미지에 마우스를 올려 북마크를 추가하세요.
+              Hover over image to bookmark.
             </span>
           </EmptyState>
         ) : (

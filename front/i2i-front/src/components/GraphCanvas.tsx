@@ -3097,13 +3097,13 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
               cursor: !currentGraphSession ? "not-allowed" : "pointer",
               background: !currentGraphSession
                 ? "linear-gradient(135deg, #4b5563 0%, #6b7280 100%)"
-                : "linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%)",
+                : "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
               color: "#fff",
               opacity: !currentGraphSession ? 0.6 : 1,
             }}
-            title="새로운 node를 canvas에 추가합니다"
+            title="Add a new prompt node to the canvas"
           >
-            + New Prompt
+            + Prompt Node
           </button>
 
           {/* Next Step Button */}
@@ -3139,7 +3139,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
                 isBranchCompleted ||
                 !hasPromptText
                 ? "linear-gradient(135deg, #4b5563 0%, #6b7280 100%)"
-                : "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
+                : "linear-gradient(135deg,rgb(241, 92, 55) 0%,rgb(236, 72, 75) 100%)",
               color: "#fff",
               opacity:
                 !currentGraphSession ||
@@ -3153,12 +3153,12 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             }}
             title={
               !selectedNodeId 
-                ? "노드를 선택하세요"
+                ? "Select a node"
                 : !hasPromptText
-                ? "프롬프트를 먼저 입력하세요"
+                ? "Enter prompt first"
                 : isBranchCompleted 
-                ? "이 브랜치는 완료되었습니다" 
-                : "선택된 브랜치에서 다음 스텝을 수행합니다"
+                ? "This branch is completed" 
+                : "Perform the next step on the selected branch"
             }
           >
             {isStepping
@@ -3219,12 +3219,12 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             }}
             title={
               !selectedNodeId 
-                ? "노드를 선택하세요"
+                ? "Select a node"
                 : !hasPromptText
-                ? "프롬프트를 먼저 입력하세요"
+                ? "Enter prompt first"
                 : isBranchCompleted 
-                ? "이 브랜치는 완료되었습니다" 
-                : "선택된 브랜치를 끝까지 자동으로 진행합니다"
+                ? "This branch is completed" 
+                : "Run the selected branch to the end"
             }
           >
             {isRunningToEnd

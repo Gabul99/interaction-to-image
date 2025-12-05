@@ -32,7 +32,7 @@ const EdgeLabel = styled.div<{ $isHovered?: boolean; $borderColor?: string }>`
   backdrop-filter: blur(8px);
   border: 2px solid ${(props) => props.$borderColor || "#8b5cf6"};
   border-radius: 8px;
-  padding: 6px 10px;
+  padding: 0px 0px;
   font-size: 10px;
   color: #f9fafb;
   pointer-events: all;
@@ -71,7 +71,7 @@ const FeedbackItem = styled.div`
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 4px 6px;
+  padding: 6px 8px;
   background: rgba(55, 65, 81, 0.4);
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.05);
@@ -97,7 +97,7 @@ const GuidanceScaleBadge = styled.span`
 
 const FeedbackTextContent = styled.div`
   color: #d1d5db;
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.3;
   word-break: break-word;
   max-height: 32px;
@@ -213,10 +213,10 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
   const hasFeedback = feedbacks.length > 0 && isBranchEdge && isFirstBranchEdge;
 
   const getAreaLabel = (area: string) => {
-    if (area === "full") return "전체";
-    if (area === "bbox") return "BBOX";
-    if (area === "sketch") return "스케치";
-    if (area === "point") return "포인팅";
+    if (area === "full") return "Full";
+    if (area === "bbox") return "Region";
+    if (area === "sketch") return "Sketch";
+    if (area === "point") return "Pointing";
     return area;
   };
 
@@ -256,9 +256,9 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
               {feedbacks.map((feedback, index) => (
                 <FeedbackItem key={feedback.id || index}>
                   <FeedbackItemHeader>
-                    <FeedbackAreaBadge area={feedback.area}>
+                    <GuidanceScaleBadge>
                       {getAreaLabel(feedback.area)}
-                    </FeedbackAreaBadge>
+                    </GuidanceScaleBadge>
                     <GuidanceScaleBadge>
                       {feedback.type === "text" ? "T" : "S"}: {feedback.guidanceScale?.toFixed(1) ?? (feedback.type === "image" ? "5.0" : "2.0")}
                     </GuidanceScaleBadge>

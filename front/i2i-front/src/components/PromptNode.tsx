@@ -59,23 +59,32 @@ const ActionRow = styled.div`
   gap: 8px;
 `;
 
-const CompositionButton = styled.button`
+const CompositionButton = styled.button<{ hasComposition?: boolean }>`
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 6px 14px;
   border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.6);
-  background: rgba(31, 41, 55, 0.8);
-  color: #e5e7eb;
+  border: 1px solid
+    ${(props) =>
+      props.hasComposition ? "rgba(56, 189, 248, 0.9)" : "rgba(148, 163, 184, 0.6)"};
+  background: ${(props) =>
+    props.hasComposition
+      ? "linear-gradient(135deg, rgba(56, 189, 248, 0.3) 0%, rgba(129, 140, 248, 0.5) 100%)"
+      : "rgba(31, 41, 55, 0.8)"};
+  color: ${(props) => (props.hasComposition ? "#f9fafb" : "#e5e7eb")};
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s ease;
 
   &:hover {
-    border-color: #6366f1;
-    background: rgba(55, 65, 81, 0.9);
+    border-color: ${(props) =>
+      props.hasComposition ? "rgba(56, 189, 248, 1)" : "#6366f1"};
+    background: ${(props) =>
+      props.hasComposition
+        ? "linear-gradient(135deg, rgba(56, 189, 248, 0.4) 0%, rgba(129, 140, 248, 0.6) 100%)"
+        : "rgba(55, 65, 81, 0.9)"};
   }
 `;
 
@@ -83,7 +92,7 @@ const GenerateButton = styled.button`
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 8px 18px;
   border-radius: 999px;
   border: 1px solid rgba(99, 102, 241, 0.6);
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.2) 100%);
@@ -112,6 +121,11 @@ interface PromptNodeData {
   onOpenComposition?: () => void;
   onGenerate?: () => void;
   hasGeneratedImages?: boolean; // 이미 생성된 이미지가 있는지 여부
+  // Composition data attached to this prompt (from bbox or sketch)
+  compositionData?: {
+    bboxes?: unknown[];
+    sketchLayers?: unknown[];
+  };
 }
 
 interface PromptNodeProps {
@@ -126,6 +140,12 @@ const PromptNode: React.FC<PromptNodeProps> = ({ data, selected }) => {
       data.onOpenComposition();
     }
   };
+
+  // 사용자가 BBOX 또는 스케치 입력을 설정한 경우 (compositionData 존재 여부로 판단)
+  const hasComposition =
+    !!data.compositionData &&
+    (((data.compositionData.bboxes || []).length > 0) ||
+      ((data.compositionData.sketchLayers || []).length > 0));
 
   const handleGenerateClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -160,14 +180,17 @@ const PromptNode: React.FC<PromptNodeProps> = ({ data, selected }) => {
           }}
         />
         <ActionRow>
-          <CompositionButton onClick={handleCompositionClick}>
-            🎨 객체 구도 배치
+          <CompositionButton
+            hasComposition={hasComposition}
+            onClick={handleCompositionClick}
+          >
+            🎨 Set Layout
           </CompositionButton>
           <GenerateButton 
             onClick={handleGenerateClick}
             disabled={!data.prompt || data.prompt.trim().length === 0}
           >
-            {data.hasGeneratedImages ? "🔄 재생성" : "✨ 생성 시작"}
+            {data.hasGeneratedImages ? "Regenerate" : "Start"}
           </GenerateButton>
         </ActionRow>
       </NodeContainer>

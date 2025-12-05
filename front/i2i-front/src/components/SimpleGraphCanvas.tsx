@@ -52,7 +52,7 @@ const BottomCenterControls = styled.div`
   gap: 12px;
 `;
 
-const GenerateButton = styled.button<{ disabled?: boolean }>`
+const AddPromptButton = styled.button<{ disabled?: boolean }>`
   padding: 12px 28px;
   border-radius: 999px;
   border: none;
@@ -63,6 +63,35 @@ const GenerateButton = styled.button<{ disabled?: boolean }>`
     props.disabled
       ? "linear-gradient(135deg, #4b5563 0%, #6b7280 100%)"
       : "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)"};
+  color: #fff;
+  opacity: ${(props) => (props.disabled ? 0.6 : 1)};
+  box-shadow: 0 6px 18px rgba(99, 102, 241, 0.4);
+  transition: all 0.2s ease;
+
+  &:hover {
+    transform: ${(props) => (props.disabled ? "none" : "translateY(-2px)")};
+    box-shadow: ${(props) =>
+      props.disabled
+        ? "0 4px 12px rgba(75, 85, 99, 0.4)"
+        : "0 8px 24px rgba(99, 102, 241, 0.5)"};
+  }
+
+  &:active {
+    transform: translateY(0);
+  }
+`;
+
+const GenerateButton = styled.button<{ disabled?: boolean }>`
+  padding: 12px 28px;
+  border-radius: 999px;
+  border: none;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: ${(props) => (props.disabled ? "not-allowed" : "pointer")};
+  background: ${(props) =>
+    props.disabled
+      ? "linear-gradient(135deg, #4b5563 0%, #6b7280 100%)"
+      : "linear-gradient(135deg,rgb(241, 92, 55) 0%,rgb(236, 72, 75) 100%)"};
   color: #fff;
   opacity: ${(props) => (props.disabled ? 0.6 : 1)};
   box-shadow: 0 6px 18px rgba(99, 102, 241, 0.4);
@@ -604,6 +633,16 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
     );
     if (!node) return "";
     return (node.data as SimplePromptNodeData).prompt ?? "";
+  }, [activePromptId, nodes]);
+
+  // Check if the active prompt already has generated images
+  const hasGeneratedImagesForActivePrompt = useMemo(() => {
+    if (!activePromptId) return false;
+    return nodes.some(
+      (n) =>
+        n.type === "image" &&
+        (n.data as { parentPromptId?: string }).parentPromptId === activePromptId
+    );
   }, [activePromptId, nodes]);
 
   const handleGenerate = useCallback(async () => {
@@ -1182,6 +1221,7 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
         onPaneClick={handlePaneClick}
         isGenerating={isGenerating}
         isGenerateDisabled={isGenerateDisabled}
+        hasGeneratedImagesForActivePrompt={hasGeneratedImagesForActivePrompt}
         error={error}
         handleGenerate={handleGenerate}
         handleAddPrompt={handleAddPrompt}
@@ -1205,6 +1245,7 @@ const SimpleGraphCanvasContent: React.FC<{
   onPaneClick: any;
   isGenerating: boolean;
   isGenerateDisabled: boolean;
+  hasGeneratedImagesForActivePrompt: boolean;
   error: string | null;
   handleGenerate: () => void;
   handleAddPrompt: () => void;
@@ -1222,6 +1263,7 @@ const SimpleGraphCanvasContent: React.FC<{
   onPaneClick,
   isGenerating,
   isGenerateDisabled,
+  hasGeneratedImagesForActivePrompt,
   error,
   handleGenerate,
   handleAddPrompt,
@@ -1231,13 +1273,13 @@ const SimpleGraphCanvasContent: React.FC<{
 
   return (
     <CanvasContainer>
-      <HelperText>
+      {/* <HelperText>
         Type your prompt in any input node, optionally upload or connect an
         image, then click &ldquo;Generate&rdquo; to create 4 images branching
         to the right. Drag an image node connection into a new prompt to use
         it as the next input.
         {error ? `  •  Error: ${error}` : null}
-      </HelperText>
+      </HelperText> */}
 
       {/* 북마크 패널 */}
       <BookmarkPanelWrapper
@@ -1247,12 +1289,17 @@ const SimpleGraphCanvasContent: React.FC<{
       />
 
         <BottomCenterControls>
+        <AddPromptButton onClick={handleAddPrompt} disabled={isGenerating}>
+            + Prompt Node
+          </AddPromptButton>
           <GenerateButton onClick={handleGenerate} disabled={isGenerateDisabled}>
-            {isGenerating ? "Generating..." : "Generate"}
+            {isGenerating
+              ? "Generating..."
+              : hasGeneratedImagesForActivePrompt
+              ? "Regenerate"
+              : "Generate"}
           </GenerateButton>
-          <GenerateButton onClick={handleAddPrompt} disabled={isGenerating}>
-            + Add Prompt
-          </GenerateButton>
+          
         </BottomCenterControls>
 
       <ReactFlow
@@ -1270,9 +1317,10 @@ const SimpleGraphCanvasContent: React.FC<{
         onNodeDragStop={onNodeDragStop}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
+        // Use scroll wheel to zoom in/out the canvas
         zoomOnScroll
         zoomOnPinch
-        panOnScroll
+        // Keep panning on drag, but disable scroll-wheel panning
         panOnDrag
         attributionPosition="bottom-left"
       >
