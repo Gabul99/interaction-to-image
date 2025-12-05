@@ -108,6 +108,7 @@ interface PromptNodeData {
   prompt?: string;
   sessionId?: string;
   onChangePrompt?: (value: string) => void;
+  onFocusPrompt?: () => void;
   onOpenComposition?: () => void;
   onGenerate?: () => void;
   hasGeneratedImages?: boolean; // 이미 생성된 이미지가 있는지 여부
@@ -116,10 +117,9 @@ interface PromptNodeData {
 interface PromptNodeProps {
   data: PromptNodeData;
   selected?: boolean;
-  id: string;
 }
 
-const PromptNode: React.FC<PromptNodeProps> = ({ data, selected, id }) => {
+const PromptNode: React.FC<PromptNodeProps> = ({ data, selected }) => {
   const handleCompositionClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (data?.onOpenComposition) {
@@ -147,7 +147,17 @@ const PromptNode: React.FC<PromptNodeProps> = ({ data, selected, id }) => {
               data.onChangePrompt(e.target.value);
             }
           }}
-          onClick={(e) => e.stopPropagation()}
+          onFocus={() => {
+            if (data.onFocusPrompt) {
+              data.onFocusPrompt();
+            }
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (data.onFocusPrompt) {
+              data.onFocusPrompt();
+            }
+          }}
         />
         <ActionRow>
           <CompositionButton onClick={handleCompositionClick}>

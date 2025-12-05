@@ -412,6 +412,17 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   // Backtracking state
   const [isBacktracking, setIsBacktracking] = useState(false);
 
+  // At least one prompt node has non-empty text
+  const hasPromptText = useMemo(() => {
+    if (!currentGraphSession) return false;
+    return currentGraphSession.nodes.some(
+      (n) =>
+        n.type === "prompt" &&
+        typeof n.data?.prompt === "string" &&
+        n.data.prompt.trim().length > 0
+    );
+  }, [currentGraphSession]);
+
   // 현재 선택된 노드의 composition 데이터 가져오기
   const compositionData = useMemo(() => {
     if (!branchingNodeId || !currentGraphSession) {
@@ -1050,6 +1061,9 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             if (currentGraphSession) {
               updatePromptNodePrompt(currentGraphSession.id, node.id, value);
             }
+          },
+          onFocusPrompt: () => {
+            selectNode(node.id);
           },
           onOpenComposition: () => {
             setCompositionModalPromptNodeId(node.id);
@@ -2662,55 +2676,131 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           {/* Next Step Button */}
           <button
             onClick={handleNextStep}
-            disabled={!currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted}
+            disabled={
+              !currentGraphSession ||
+              !selectedNodeId ||
+              isStepping ||
+              isRunningToEnd ||
+              isBranchCompleted ||
+              !hasPromptText
+            }
             style={{
               padding: "10px 16px",
               borderRadius: 8,
               border: "none",
               fontWeight: 700,
-              cursor: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted ? "not-allowed" : "pointer",
-              background: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted
+              cursor:
+                !currentGraphSession ||
+                !selectedNodeId ||
+                isStepping ||
+                isRunningToEnd ||
+                isBranchCompleted ||
+                !hasPromptText
+                  ? "not-allowed"
+                  : "pointer",
+              background:
+                !currentGraphSession ||
+                !selectedNodeId ||
+                isStepping ||
+                isRunningToEnd ||
+                isBranchCompleted ||
+                !hasPromptText
                 ? "linear-gradient(135deg, #4b5563 0%, #6b7280 100%)"
                 : "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
               color: "#fff",
-              opacity: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted ? 0.6 : 1,
+              opacity:
+                !currentGraphSession ||
+                !selectedNodeId ||
+                isStepping ||
+                isRunningToEnd ||
+                isBranchCompleted ||
+                !hasPromptText
+                  ? 0.6
+                  : 1,
             }}
             title={
               !selectedNodeId 
-                ? "노드를 선택하세요" 
+                ? "노드를 선택하세요"
+                : !hasPromptText
+                ? "프롬프트를 먼저 입력하세요"
                 : isBranchCompleted 
                 ? "이 브랜치는 완료되었습니다" 
                 : "선택된 브랜치에서 다음 스텝을 수행합니다"
             }
           >
-            {isStepping ? "Processing..." : !selectedNodeId ? "Select a node" : isBranchCompleted ? "Completed ✓" : "Next Step"}
+            {isStepping
+              ? "Processing..."
+              : !selectedNodeId
+              ? "Select a node"
+              : !hasPromptText
+              ? "Fill prompt"
+              : isBranchCompleted
+              ? "Completed ✓"
+              : "Next Step"}
           </button>
           
           {/* Run to End Button */}
           <button
             onClick={handleRunToEnd}
-            disabled={!currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted}
+            disabled={
+              !currentGraphSession ||
+              !selectedNodeId ||
+              isStepping ||
+              isRunningToEnd ||
+              isBranchCompleted ||
+              !hasPromptText
+            }
             style={{
               padding: "10px 16px",
               borderRadius: 8,
               border: "none",
               fontWeight: 700,
-              cursor: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted ? "not-allowed" : "pointer",
-              background: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted
+              cursor:
+                !currentGraphSession ||
+                !selectedNodeId ||
+                isStepping ||
+                isRunningToEnd ||
+                isBranchCompleted ||
+                !hasPromptText
+                  ? "not-allowed"
+                  : "pointer",
+              background:
+                !currentGraphSession ||
+                !selectedNodeId ||
+                isStepping ||
+                isRunningToEnd ||
+                isBranchCompleted ||
+                !hasPromptText
                 ? "linear-gradient(135deg, #4b5563 0%, #6b7280 100%)"
                 : "linear-gradient(135deg, #10b981 0%, #059669 100%)",
               color: "#fff",
-              opacity: !currentGraphSession || !selectedNodeId || isStepping || isRunningToEnd || isBranchCompleted ? 0.6 : 1,
+              opacity:
+                !currentGraphSession ||
+                !selectedNodeId ||
+                isStepping ||
+                isRunningToEnd ||
+                isBranchCompleted ||
+                !hasPromptText
+                  ? 0.6
+                  : 1,
             }}
             title={
               !selectedNodeId 
-                ? "노드를 선택하세요" 
+                ? "노드를 선택하세요"
+                : !hasPromptText
+                ? "프롬프트를 먼저 입력하세요"
                 : isBranchCompleted 
                 ? "이 브랜치는 완료되었습니다" 
                 : "선택된 브랜치를 끝까지 자동으로 진행합니다"
             }
           >
-            {isRunningToEnd ? "Running..." : isBranchCompleted ? "Completed ✓" : "Run to End"}
+            {isRunningToEnd
+              ? "Running..."
+              : !hasPromptText
+              ? "Fill prompt"
+              : isBranchCompleted
+              ? "Completed ✓"
+              : "Run to End"}
           </button>
 
           {/* Pause Button - only visible when running */}
