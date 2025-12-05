@@ -113,31 +113,33 @@ const NodeLabel = styled.div`
 // Now positioned absolutely within the wrapper, not using Portal
 const BranchingButton = styled.button`
   position: absolute;
-  top: 4px; /* Within the padding-top area */
+  top: -5px; /* Within the padding-top area */
   left: 50%;
   transform: translateX(-50%);
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  /* More prominent color for branching */
+  background: linear-gradient(135deg, #f97316 0%, #ec4899 100%);
   border: none;
-  border-radius: 6px;
-  padding: 6px 14px;
+  /* Rounder, larger pill-shaped button */
+  border-radius: 999px;
+  padding: 10px 20px;
   color: white;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
   transition: all 0.2s ease;
-  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 4px 14px rgba(248, 113, 113, 0.45);
   z-index: 100;
   white-space: nowrap;
 
   &:hover {
-    transform: translateX(-50%) scale(1.05);
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.5);
+    transform: translateX(-50%) scale(1.06);
+    box-shadow: 0 6px 18px rgba(248, 113, 113, 0.6);
   }
 
   &:active {
-    transform: translateX(-50%) scale(0.98);
+    transform: translateX(-50%) scale(0.96);
   }
 `;
 
@@ -333,7 +335,7 @@ const ImageNode: React.FC<ImageNodeProps> = ({ data, selected, id }) => {
         className="branching-button"
         onClick={handleBranchClick}
       >
-        ✨ Branching
+        ✨ 새 방향 생성
       </BranchingButton>
       
       <Handle type="target" position={Position.Left} style={{ background: "#6366f1", top: "50%" }} />
