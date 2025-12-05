@@ -3,6 +3,7 @@ import io
 import uuid
 import base64
 import json
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,6 +38,18 @@ def _img_to_base64_png(img: Optional[Image.Image]) -> Optional[str]:
     img.save(buf, format="PNG")
     data = base64.b64encode(buf.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{data}"
+
+
+def _get_images_dir() -> Path:
+    """
+    Get the reference images directory.
+    Defaults to <repo_root>/i2i/images but can be overridden via I2I_IMAGES_DIR.
+    """
+    env_dir = os.environ.get("I2I_IMAGES_DIR")
+    if env_dir:
+        return Path(env_dir)
+    # api.py is at i2i/server/api.py -> go up one level to i2i/
+    return Path(__file__).resolve().parents[1] / "images"
 
 
 def _parse_bool(x: Optional[str]) -> bool:
@@ -696,6 +709,51 @@ async def save_session(req: SaveSessionReq):
         })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------- Reference image gallery ---------- #
+@app.get("/api/gallery/reference-images")
+async def get_reference_images(limit: int = 8):
+    """
+    Return a random subset of reference images from the images folder as data URLs.
+    This is used by the frontend to show a gallery of example style images.
+    """
+    images_dir = _get_images_dir()
+    if not images_dir.exists() or not images_dir.is_dir():
+        return JSONResponse({"images": []})
+
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+    files = [p for p in images_dir.iterdir() if p.suffix.lower() in exts and p.is_file()]
+    if not files:
+        return JSONResponse({"images": []})
+
+    random.shuffle(files)
+    selected = files[: max(1, min(limit, 16))]
+
+    images: List[Dict[str, str]] = []
+    for p in selected:
+        try:
+            img = Image.open(p).convert("RGB")
+            data_url = _img_to_base64_png(img)
+            if data_url:
+                images.append(
+                    {
+                        "id": p.name,
+                        "dataUrl": data_url,
+                    }
+                )
+        except Exception:
+            continue
+
+    return JSONResponse({"images": images})
+
+
+@app.get("/api/gallery")
+async def get_reference_images_compat(limit: int = 8):
+    """
+    Backwards-compatible alias for /api/gallery/reference-images.
+    """
+    return await get_reference_images(limit=limit)
 
 
 @app.get("/api/session/load")
