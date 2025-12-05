@@ -760,12 +760,12 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
     <ModalOverlay visible={visible} onClick={handleCancel}>
       <ModalContainer onClick={(e) => e.stopPropagation()}>
         <ModalHeader>
-          <ModalTitle>새 이미지 생성</ModalTitle>
+          <ModalTitle>Set Layout</ModalTitle>
           <CloseButton onClick={handleCancel}>×</CloseButton>
         </ModalHeader>
         <ModalContent>
           <Section>
-            <SectionTitle>프롬프트</SectionTitle>
+            <SectionTitle>Text Prompt</SectionTitle>
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -776,7 +776,7 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
             >
               <PromptInput
                 type="text"
-                placeholder="이미지 생성을 위한 프롬프트를 입력하세요..."
+                placeholder="Describe the image you want to generate..."
                 value={currentPrompt}
                 onChange={(e) => {
                   const newPrompt = e.target.value;
@@ -792,7 +792,7 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
                 type="submit"
                 disabled={isLoadingObjects || !currentPrompt.trim()}
               >
-                객체 리스트 생성
+                Generate Object List
               </SendPromptButton>
             </form>
           </Section>
@@ -805,7 +805,7 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
             <TwoColumnLayout>
               <LeftColumn>
                 <Section>
-                  <SectionTitle>객체 리스트</SectionTitle>
+                  <SectionTitle>Object List</SectionTitle>
                   <ObjectChipList
                     objects={compositionState.objects}
                     selectedObjectId={compositionState.selectedObjectId}
@@ -817,12 +817,12 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
               </LeftColumn>
               <RightColumn>
                 <Section>
-                  <SectionTitle>구도 설정</SectionTitle>
+                  <SectionTitle>Set Layout</SectionTitle>
 
                   {/* 구도 방식 선택 */}
                   {!compositionMode && (
                     <>
-                      <SectionTitle>구도 방식 선택</SectionTitle>
+                      <SectionTitle>Select Layout Type</SectionTitle>
                       <OptionGroup>
                         <OptionButton
                           selected={false}
@@ -832,7 +832,7 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
                             setToolMode("select");
                           }}
                         >
-                          박스 (BBOX)
+                          Box
                         </OptionButton>
                         <OptionButton
                           selected={false}
@@ -846,12 +846,12 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
                             setToolMode("select");
                           }}
                         >
-                          스케치
+                          Sketch
                         </OptionButton>
                       </OptionGroup>
                       <InstructionText>
-                        구도 설정 방식을 선택하세요. 박스 또는 스케치 중 하나만
-                        선택할 수 있습니다.
+                        Select the layout type. 
+                        You can only choose one of box or sketch.
                       </InstructionText>
                     </>
                   )}
@@ -961,7 +961,7 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
 
           <ActionButtonGroup>
             <ActionButton variant="cancel" onClick={handleCancel}>
-              취소
+              Cancel
             </ActionButton>
             <ActionButton
               variant="submit"
@@ -969,10 +969,10 @@ const CompositionModal: React.FC<CompositionModalProps> = ({
               disabled={!currentPrompt || isLoadingObjects}
             >
               {compositionMode === "bbox" && compositionState.bboxes.length > 0
-                ? "구도 설정 완료 및 이미지 생성 시작"
+                ? "Start Generation"
                 : compositionMode === "sketch" && sketchLayers.length > 0
-                ? "구도 설정 완료 및 이미지 생성 시작"
-                : "구도 없이 이미지 생성 시작"}
+                ? "Start Generation"
+                : "Start Generation Without Layout"}
             </ActionButton>
           </ActionButtonGroup>
         </ModalContent>

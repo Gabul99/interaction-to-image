@@ -99,7 +99,7 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
                 <div style={{ marginTop: "16px" }}>이미지 생성 중...</div>
               </>
             ) : (
-              "객체를 선택하고 이 곳에서 구도를 설정하세요"
+              "Select an object and set the layout here"
             )}
           </PlaceholderImage>
         )}

@@ -211,7 +211,7 @@ const ObjectChipList: React.FC<ObjectChipListProps> = ({
       <AddObjectContainer>
         <AddObjectInput
           type="text"
-          placeholder="객체 추가..."
+          placeholder="Add an object..."
           value={newObjectLabel}
           onChange={(e) => setNewObjectLabel(e.target.value)}
           onKeyPress={handleKeyPress}

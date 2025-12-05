@@ -496,6 +496,7 @@ const Slider = styled.input`
 
   &::-webkit-slider-thumb {
     appearance: none;
+    margin-top: -5px;
     width: 16px;
     height: 16px;
     border-radius: 50%;
@@ -982,8 +983,8 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     (selectedType === "text" ? text.trim().length > 0 : imageFile !== null);
 
   const getAreaLabel = (area: FeedbackArea) => {
-    if (area === "full") return "전체 이미지";
-    if (area === "bbox") return "BBOX";
+    if (area === "full") return "Full Image";
+    if (area === "bbox") return "Region";
     return "";
   };
 
@@ -1026,7 +1027,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     <ModalOverlay visible={visible} onClick={handleCancel}>
       <ModalContainer onClick={(e) => e.stopPropagation()}>
         <ModalHeader>
-          <ModalTitle>브랜치 생성</ModalTitle>
+          <ModalTitle>Set New Direction</ModalTitle>
           <CloseButton onClick={handleCancel}>×</CloseButton>
         </ModalHeader>
         <ModalContent>
@@ -1034,7 +1035,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
             <TwoColumnLayout>
               <ImageColumn>
                 <ImageSection>
-                  <SectionTitle>이미지</SectionTitle>
+                  <SectionTitle>Intermediate Image</SectionTitle>
                   <ImageContainer>
                     <ImageViewer
                       imageUrl={nodeImageUrl}
@@ -1139,13 +1140,13 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                       : undefined
                   }
                 >
-                  + 피드백 추가하기
+                  + Add Instruction
                 </AddFeedbackButton>
 
                 {isAddingFeedback && (
                   <AddFeedbackForm>
                     {/* 첫 번째 선택: 전체 이미지 vs 일부 */}
-                    <SectionTitle>영역 선택</SectionTitle>
+                    <SectionTitle>Select Region</SectionTitle>
                     <OptionGroup>
                       <OptionButton
                         selected={selectedAreaType === "full"}
@@ -1168,7 +1169,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                             : undefined
                         }
                       >
-                        전체 이미지
+                        Full Image
                       </OptionButton>
                       <OptionButton
                         selected={selectedAreaType === "partial"}
@@ -1188,7 +1189,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                             : undefined
                         }
                       >
-                        영역 지정
+                        Set Region
                       </OptionButton>
                     </OptionGroup>
 
@@ -1196,7 +1197,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                     {selectedAreaType === "partial" && !selectedPartialTool && (
                       <>
                         <InstructionText>
-                          이미지 위에서 BBOX를 그려주세요.
+                          Set the region on the image.
                         </InstructionText>
                         <OptionButton
                           selected={false}
@@ -1206,7 +1207,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                             setToolMode("bbox");
                           }}
                         >
-                          BBOX 그리기 시작
+                          Start Drawing Region
                         </OptionButton>
                       </>
                     )}
@@ -1225,32 +1226,32 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                           </InstructionText>
                         )}
 
-                        <SectionTitle>피드백 방식</SectionTitle>
+                        <SectionTitle>Instruction Type</SectionTitle>
                         <OptionGroup>
                           <OptionButton
                             selected={selectedType === "text"}
                             onClick={() => setSelectedType("text")}
                           >
-                            텍스트
+                            Text
                           </OptionButton>
                           <OptionButton
                             selected={selectedType === "image"}
                             onClick={() => setSelectedType("image")}
                           >
-                            이미지
+                            Image
                           </OptionButton>
                         </OptionGroup>
 
                         {selectedType === "text" && (
                           <>
                             <TextArea
-                              placeholder="피드백을 입력하세요..."
+                              placeholder="Enter desired attribute as short keyword or noun phrase..."
                               value={text}
                               onChange={(e) => setText(e.target.value)}
                             />
                             <SliderContainer>
                               <SliderLabel>
-                                <span>Text Guidance Scale</span>
+                                <span>Temperature</span>
                                 <SliderValue>{textGuidanceScale.toFixed(1)}</SliderValue>
                               </SliderLabel>
                               <Slider
@@ -1310,14 +1311,14 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                             variant="cancel"
                             onClick={handleCancelAdd}
                           >
-                            취소
+                            Cancel
                           </FormButton>
                           <FormButton
                             variant="submit"
                             onClick={handleSubmitFeedback}
                             disabled={!canSubmit}
                           >
-                            저장
+                            Save
                           </FormButton>
                         </FormButtonGroup>
                       </>
@@ -1328,7 +1329,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                 {currentFeedbackList.length > 0 && (
                   <>
                     <SectionTitle>
-                      피드백 목록 ({currentFeedbackList.length})
+                      Instruction List ({currentFeedbackList.length})
                     </SectionTitle>
                     <FeedbackList>
                       {currentFeedbackList.map((feedback) => (
@@ -1338,21 +1339,14 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                               <FeedbackAreaBadge area={feedback.area}>
                                 {getAreaLabel(feedback.area)}
                               </FeedbackAreaBadge>
-                              <span style={{ 
-                                fontSize: "11px", 
-                                color: "#6366f1",
-                                background: "rgba(99, 102, 241, 0.15)",
-                                padding: "2px 6px",
-                                borderRadius: "4px",
-                                fontWeight: 500
-                              }}>
-                                {feedback.type === "image" ? "Style" : "Text"} Scale: {feedback.guidanceScale?.toFixed(1) ?? (feedback.type === "image" ? "5.0" : "2.0")}
-                              </span>
+                              <FeedbackAreaBadge area={feedback.area}>
+                                Temperature: {feedback.guidanceScale?.toFixed(1) ?? (feedback.type === "image" ? "5.0" : "2.0")}
+                              </FeedbackAreaBadge>
                             </FeedbackItemInfo>
                             <DeleteButton
                               onClick={() => handleDeleteFeedback(feedback.id)}
                             >
-                              삭제
+                              Delete
                             </DeleteButton>
                           </FeedbackItemHeader>
                           {feedback.text && (
@@ -1360,7 +1354,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                           )}
                           {feedback.imageUrl && (
                             <div style={{ fontSize: "12px", color: "#9ca3af" }}>
-                              [참조 이미지 피드백]
+                              [Reference Image Instruction]
                             </div>
                           )}
                         </FeedbackItem>
@@ -1371,13 +1365,13 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
 
                 {currentFeedbackList.length === 0 && !isAddingFeedback && (
                   <InstructionText>
-                    피드백을 추가하여 브랜치를 생성하세요.
+                    Add instructions to create a new direction.
                   </InstructionText>
                 )}
 
                 <ActionButtonGroup>
                   <ActionButton variant="cancel" onClick={handleCancel} disabled={isCreatingBranch}>
-                    취소
+                    Cancel
                   </ActionButton>
                   <ActionButton
                     variant="submit"
@@ -1385,7 +1379,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                     disabled={currentFeedbackList.length === 0 || isCreatingBranch}
                   >
                     {isCreatingBranch && <Spinner />}
-                    {isCreatingBranch ? "생성 중..." : "브랜치 생성"}
+                    {isCreatingBranch ? "Creating..." : "Set New Direction"}
                   </ActionButton>
                 </ActionButtonGroup>
               </RightColumn>
@@ -1397,20 +1391,20 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                 disabled={hasFullFeedback}
                 title={
                   hasFullFeedback
-                    ? "전체 이미지 피드백이 하나 있습니다. 삭제 후 추가할 수 있습니다."
+                    ? "There is already a full image instruction. Please delete it before adding a new one."
                     : undefined
                 }
               >
-                + 피드백 추가하기
+                + Add Instruction
               </AddFeedbackButton>
               {currentFeedbackList.length === 0 && !isAddingFeedback && (
                 <InstructionText>
-                  피드백을 추가하여 브랜치를 생성하세요.
+                  Add instructions to create a new direction.
                 </InstructionText>
               )}
               <ActionButtonGroup>
                 <ActionButton variant="cancel" onClick={handleCancel} disabled={isCreatingBranch}>
-                  취소
+                  Cancel
                 </ActionButton>
                 <ActionButton
                   variant="submit"
@@ -1418,7 +1412,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                   disabled={currentFeedbackList.length === 0 || isCreatingBranch}
                 >
                   {isCreatingBranch && <Spinner />}
-                  {isCreatingBranch ? "생성 중..." : "브랜치 생성"}
+                  {isCreatingBranch ? "Creating..." : "Set New Direction"}
                 </ActionButton>
               </ActionButtonGroup>
             </>
