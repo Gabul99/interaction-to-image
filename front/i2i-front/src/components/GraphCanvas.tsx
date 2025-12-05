@@ -1852,7 +1852,17 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       
       // Get the correct backend session for this node (may be from a parallel session)
       const nodeSession = getBackendSessionForNode(selectedNodeId);
-      const sessionId = nodeSession?.sessionId || backendSessionId || currentGraphSession.id;
+      const sessionId = nodeSession?.sessionId || backendSessionId;
+      
+      // If there is no valid backend session, we cannot step yet
+      // This happens when the user has only filled the prompt but hasn't started generation
+      if (!sessionId) {
+        console.error(
+          "[GraphCanvas] Next Step: No backend session for selected node. Please start generation from the prompt node first."
+        );
+        alert("먼저 프롬프트에서 '✨ 생성 시작' 버튼을 눌러 세션을 시작한 후 Next Step을 사용할 수 있습니다.");
+        return;
+      }
       
       // Get unique branch ID for frontend filtering
       const uniqueBranchId = getTargetBranchFromSelectedNode();
@@ -2047,7 +2057,17 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       
       // Get the correct backend session for this node (may be from a parallel session)
       const nodeSession = getBackendSessionForNode(selectedNodeId);
-      const backendSession = nodeSession?.sessionId || backendSessionId || currentGraphSession.id;
+      const backendSession = nodeSession?.sessionId || backendSessionId;
+      
+      // If there is no valid backend session, we cannot run to end yet
+      // This happens when the user has only filled the prompt but hasn't started generation
+      if (!backendSession) {
+        console.error(
+          "[GraphCanvas] Run to End: No backend session for selected node. Please start generation from the prompt node first."
+        );
+        alert("먼저 프롬프트에서 '✨ 생성 시작' 버튼을 눌러 세션을 시작한 후 Run to End를 사용할 수 있습니다.");
+        return;
+      }
       
       // Get unique branch ID for frontend filtering
       const uniqueBranchId = getTargetBranchFromSelectedNode();
