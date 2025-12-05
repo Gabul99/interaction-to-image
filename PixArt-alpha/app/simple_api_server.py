@@ -199,6 +199,19 @@ class SaveSessionReq(BaseModel):
     participant: int = Field(..., description="Participant number")
     graphSession: Dict[str, Any] = Field(..., description="GraphSession data to save")
     bookmarkedNodeIds: Optional[List[str]] = Field(default=[], description="Array of bookmarked node IDs")
+    lastLogId: Optional[str] = Field(default=None, description="Last log ID for synchronization")
+    lastLogTimestamp: Optional[int] = Field(default=None, description="Last log timestamp for synchronization")
+
+
+class LogEntryReq(BaseModel):
+    """Request model for saving a log entry."""
+    logId: str = Field(..., description="UUID v4 log ID")
+    timestamp: int = Field(..., description="Timestamp in milliseconds")
+    participant: int = Field(..., description="Participant number")
+    mode: str = Field(..., description="Mode string (e.g., 'step' or 'prompt')")
+    sessionId: str = Field(..., description="GraphSession ID")
+    action: str = Field(..., description="Action type")
+    data: Dict[str, Any] = Field(..., description="Action-specific data")
 
 
 # =============================================================================
@@ -674,6 +687,8 @@ async def save_session(req: SaveSessionReq):
             "graphSession": req.graphSession,
             "lastUpdated": datetime.now().isoformat() + "Z",
             "bookmarkedNodeIds": req.bookmarkedNodeIds or [],
+            "lastLogId": req.lastLogId,
+            "lastLogTimestamp": req.lastLogTimestamp,
         }
         
         # Write to file
@@ -720,6 +735,47 @@ async def load_session(mode: str, p: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load session: {str(e)}")
+
+
+@app.post("/api/logs/save")
+async def save_log(req: LogEntryReq):
+    """
+    Save a log entry to disk.
+    Saves to: logs/{mode}/p{participant}/logs_{timestamp}.json
+    """
+    try:
+        logs_dir = _get_logs_dir()
+        mode_dir = logs_dir / req.mode
+        participant_dir = mode_dir / f"p{req.participant}"
+        participant_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate timestamp for filename (use log timestamp)
+        timestamp_str = datetime.fromtimestamp(req.timestamp / 1000).strftime("%Y%m%d%H%M%S")
+        filename = f"logs_{timestamp_str}_{req.logId[:8]}.json"
+        filepath = participant_dir / filename
+        
+        # Prepare log data
+        log_data = {
+            "logId": req.logId,
+            "timestamp": req.timestamp,
+            "participant": req.participant,
+            "mode": req.mode,
+            "sessionId": req.sessionId,
+            "action": req.action,
+            "data": req.data,
+        }
+        
+        # Write to file
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(log_data, f, indent=2, ensure_ascii=False)
+        
+        return {
+            "status": "ok",
+            "message": f"Log saved to {filepath}",
+            "filepath": str(filepath),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save log: {str(e)}")
 
 
 if __name__ == "__main__":

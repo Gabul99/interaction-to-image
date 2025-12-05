@@ -1,0 +1,13 @@
+{
+  "logId": "1a059212-c527-4d97-8bcb-3295b25186b2",
+  "timestamp": 1764944275123,
+  "participant": 1557,
+  "mode": "prompt",
+  "sessionId": "simple-session",
+  "action": "simple_generate",
+  "data": {
+    "promptNodeId": "prompt-1",
+    "prompt": "Ronaldo",
+    "isRegeneration": false
+  }
+}

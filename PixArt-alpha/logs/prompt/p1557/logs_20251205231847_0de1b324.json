@@ -1,0 +1,17 @@
+{
+  "logId": "0de1b324-0f16-4f47-8b55-94d3875c93cd",
+  "timestamp": 1764944327229,
+  "participant": 1557,
+  "mode": "prompt",
+  "sessionId": "simple-session",
+  "action": "backtrack",
+  "data": {
+    "targetNodeId": "prompt-2-image-1",
+    "targetStep": 1,
+    "branchId": "",
+    "backtrackToStep": 0,
+    "removedNodeIds": [
+      "prompt-2-image-1"
+    ]
+  }
+}

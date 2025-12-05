@@ -1,0 +1,14 @@
+{
+  "logId": "5ec04e0e-5405-4e42-81b2-0567a4fd11f7",
+  "timestamp": 1764944602715,
+  "participant": 1557,
+  "mode": "step",
+  "sessionId": "empty_1764944550592",
+  "action": "run_to_end_paused",
+  "data": {
+    "branchId": "sess_bf03f967_B0",
+    "pausedAtStep": 20,
+    "totalStepsGenerated": 5,
+    "duration": 0
+  }
+}

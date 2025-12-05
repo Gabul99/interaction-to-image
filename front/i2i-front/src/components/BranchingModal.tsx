@@ -914,6 +914,13 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
       }
       
       clearCurrentFeedbackList();
+      
+      // Call onBranchCreated callback with the new branch ID and source node ID
+      // Note: websocketUrl is not available here, but can be passed if needed
+      if (onBranchCreated) {
+        onBranchCreated(newBranchId, undefined, nodeId);
+      }
+      
       onClose();
     } catch (error) {
       console.error("[BranchingModal] 브랜치 생성 실패:", error);

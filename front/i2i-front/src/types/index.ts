@@ -120,3 +120,143 @@ export interface GraphSession {
   edges: GraphEdge[];
   branches: Branch[];
 }
+
+// 로깅 관련 타입
+export interface LogEntry {
+  logId: string; // UUID v4
+  timestamp: number; // 밀리초
+  participant: number;
+  mode: string; // "step" | "prompt"
+  sessionId: string; // GraphSession ID
+  action: string; // 액션 타입
+  data: Record<string, any>; // 액션별 데이터
+}
+
+// 각 액션별 로그 데이터 타입
+export interface PromptNodeCreatedData {
+  nodeId: string;
+  prompt: string;
+  compositionData?: {
+    bboxes: BoundingBox[];
+    sketchLayers: SketchLayer[];
+  };
+}
+
+export interface CompositionConfiguredData {
+  promptNodeId: string;
+  objects: ObjectChip[];
+  bboxes: BoundingBox[];
+  sketchLayers?: SketchLayer[];
+}
+
+export interface GenerationStartedData {
+  sourceNodeId: string;
+  sourceNodeType: "prompt" | "image";
+  sourceNodeStep?: number;
+  branchId: string;
+  prompt: string;
+  isRegeneration: boolean;
+  compositionData?: {
+    bboxes: BoundingBox[];
+    sketchLayers: SketchLayer[];
+  };
+}
+
+export interface NextStepClickedData {
+  sourceNodeId: string;
+  sourceNodeStep: number;
+  branchId: string;
+  expectedNextStep: number;
+}
+
+export interface RunToEndStartedData {
+  sourceNodeId: string;
+  sourceNodeStep: number;
+  branchId: string;
+  currentStep: number;
+  targetStep: number;
+}
+
+export interface RunToEndPausedData {
+  branchId: string;
+  pausedAtStep: number;
+  totalStepsGenerated: number;
+  duration: number; // 밀리초
+}
+
+export interface SimpleGenerateData {
+  promptNodeId: string;
+  prompt: string;
+  imageUrl?: string;
+  isRegeneration: boolean;
+}
+
+export interface ImageReceivedData {
+  nodeId: string;
+  branchId: string;
+  step: number;
+  imageUrl: string;
+  generationDuration: number; // 밀리초
+  sourceAction: "next_step" | "run_to_end" | "generation_started" | "simple_generate" | "branch" | "merge";
+}
+
+export interface BranchCreatedData {
+  sourceNodeId: string;
+  sourceNodeStep: number;
+  sourceBranchId: string;
+  newBranchId: string;
+  feedback: {
+    type: FeedbackType;
+    area: FeedbackArea;
+    text?: string;
+    imageUrl?: string;
+    point?: { x: number; y: number };
+    bbox?: { x: number; y: number; width: number; height: number };
+    guidanceScale?: number;
+  };
+  isAfterComplete: boolean;
+  sourceBranchMaxStep: number;
+}
+
+export interface MergeCreatedData {
+  sourceNode1Id: string;
+  sourceNode1Step: number;
+  sourceNode1BranchId: string;
+  sourceNode2Id: string;
+  sourceNode2Step: number;
+  sourceNode2BranchId: string;
+  newBranchId: string;
+  mergeStartStep: number;
+  mergeWeight: number;
+}
+
+export interface NodeDeletedData {
+  nodeId: string;
+  nodeType: "prompt" | "image";
+  nodeStep?: number;
+  branchId?: string;
+  deletedNodeIds: string[];
+}
+
+export interface BacktrackData {
+  targetNodeId: string;
+  targetStep: number;
+  branchId: string;
+  backtrackToStep: number;
+  removedNodeIds: string[];
+}
+
+export interface BookmarkToggledData {
+  nodeId: string;
+  nodeStep: number;
+  branchId: string;
+  isBookmarked: boolean;
+  imageUrl: string;
+}
+
+export interface NodeSelectedData {
+  nodeId: string | null;
+  nodeType?: "prompt" | "image";
+  nodeStep?: number;
+  branchId?: string;
+}

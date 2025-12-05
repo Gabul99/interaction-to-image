@@ -26,6 +26,7 @@ import CompositionModal from "./CompositionModal";
 import FeedbackEdge from "./FeedbackEdge";
 import BookmarkPanel from "./BookmarkPanel";
 import { stepOnce, mergeBranches, backtrackTo, startSession } from "../lib/api";
+import { logActionAndSaveSession } from "../utils/logging";
 
 // 북마크 패널 래퍼 - useReactFlow를 사용하기 위해 ReactFlowProvider 내부에 있어야 함
 const BookmarkPanelWrapper: React.FC<{
@@ -587,6 +588,75 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     },
     [currentGraphSession]
   );
+
+  // 북마크 변경 감지 및 로깅 (getNodeBranchId 정의 이후에 위치)
+  const prevBookmarkedNodeIdsRef = useRef<string[]>([]);
+  useEffect(() => {
+    if (!currentGraphSession || !participant || !mode) return;
+    
+    const currentBookmarked = bookmarkedNodeIds || [];
+    const prevBookmarked = prevBookmarkedNodeIdsRef.current;
+    
+    // 새로 추가된 북마크
+    const newlyBookmarked = currentBookmarked.filter((id) => !prevBookmarked.includes(id));
+    // 제거된 북마크
+    const newlyUnbookmarked = prevBookmarked.filter((id) => !currentBookmarked.includes(id));
+    
+    // 로깅
+    const logBookmarkChanges = async () => {
+      for (const nodeId of newlyBookmarked) {
+        const node = currentGraphSession.nodes.find((n) => n.id === nodeId);
+        if (node && node.type === "image") {
+          const branchId = getNodeBranchId(nodeId) || "";
+          await logActionAndSaveSession(
+            "bookmark_toggled",
+            {
+              nodeId: nodeId,
+              nodeStep: node.data?.step || 0,
+              branchId: branchId,
+              isBookmarked: true,
+              imageUrl: node.data?.imageUrl || "",
+            },
+            participant,
+            mode,
+            currentGraphSession,
+            bookmarkedNodeIds
+          ).catch((error) => {
+            console.error("[GraphCanvas] Failed to log bookmark_toggled:", error);
+          });
+        }
+      }
+      
+      for (const nodeId of newlyUnbookmarked) {
+        const node = currentGraphSession.nodes.find((n) => n.id === nodeId);
+        if (node && node.type === "image") {
+          const branchId = getNodeBranchId(nodeId) || "";
+          await logActionAndSaveSession(
+            "bookmark_toggled",
+            {
+              nodeId: nodeId,
+              nodeStep: node.data?.step || 0,
+              branchId: branchId,
+              isBookmarked: false,
+              imageUrl: node.data?.imageUrl || "",
+            },
+            participant,
+            mode,
+            currentGraphSession,
+            bookmarkedNodeIds
+          ).catch((error) => {
+            console.error("[GraphCanvas] Failed to log bookmark_toggled:", error);
+          });
+        }
+      }
+    };
+    
+    if (newlyBookmarked.length > 0 || newlyUnbookmarked.length > 0) {
+      logBookmarkChanges();
+    }
+    
+    prevBookmarkedNodeIdsRef.current = currentBookmarked;
+  }, [bookmarkedNodeIds, currentGraphSession, participant, mode, getNodeBranchId]);
 
   // Get the full trajectory of a node: all ancestors (parents) and all descendants (children)
   // This highlights the complete path from root to all leaf nodes through the selected node
@@ -1603,6 +1673,34 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           // Select the newly created merged branch node
           selectNode(newNodeId);
           console.log(`[GraphCanvas] Selected merged branch node: ${newNodeId}`);
+          
+          // 로깅: Merge 생성
+          if (participant && mode) {
+            const finalState = useImageStore.getState();
+            const updatedSession = finalState.currentGraphSession;
+            if (updatedSession) {
+              await logActionAndSaveSession(
+                "merge_created",
+                {
+                  sourceNode1Id: mergeSourceNode.id,
+                  sourceNode1Step: sourceStep,
+                  sourceNode1BranchId: sourceUniqueBranchId || "",
+                  sourceNode2Id: mergeTargetNode.id,
+                  sourceNode2Step: targetStep,
+                  sourceNode2BranchId: targetUniqueBranchId || "",
+                  newBranchId: result.new_branch_id || "",
+                  mergeStartStep: actualMergeStartStep,
+                  mergeWeight: 0.5,
+                },
+                participant,
+                mode,
+                updatedSession,
+                bookmarkedNodeIds
+              ).catch((error) => {
+                console.error("[GraphCanvas] Failed to log merge_created:", error);
+              });
+            }
+          }
         }
       }
     } catch (error) {
@@ -1799,12 +1897,73 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   );
 
   const handleBranchCreated = useCallback(
-    (branchId: string, websocketUrl?: string) => {
-      console.log("브랜치 생성됨:", branchId, websocketUrl);
+    async (branchId: string, websocketUrl?: string, sourceNodeId?: string) => {
+      console.log("브랜치 생성됨:", branchId, websocketUrl, "sourceNodeId:", sourceNodeId);
+      
+      // sourceNodeId를 파라미터로 받거나, 없으면 branchingNodeId 사용 (fallback)
+      const sourceNodeIdForLogging = sourceNodeId || branchingNodeId;
+      
       setBranchingModalVisible(false);
       setBranchingNodeId(null);
 
       if (!currentGraphSession) return;
+      
+      // 로깅: 브랜치 생성 (브랜치 생성 후 업데이트된 세션 사용)
+      if (sourceNodeIdForLogging && participant && mode) {
+        // 브랜치 생성 후 세션이 업데이트될 때까지 약간의 지연
+        setTimeout(async () => {
+          // 브랜치 생성 후 업데이트된 세션 가져오기
+          const updatedSession = useImageStore.getState().currentGraphSession;
+          if (!updatedSession) return;
+          
+          const sourceNode = updatedSession.nodes.find((n) => n.id === sourceNodeIdForLogging);
+          const sourceStep = sourceNode?.data?.step || 0;
+          const sourceBranchId = getNodeBranchId(sourceNodeIdForLogging) || "";
+          
+          // 소스 브랜치의 최대 스텝 찾기
+          const sourceBranchNodes = updatedSession.nodes.filter((n) => {
+            if (n.type !== "image") return false;
+            const nodeBranchId = getNodeBranchId(n.id);
+            return nodeBranchId === sourceBranchId;
+          });
+          const sourceBranchMaxStep = sourceBranchNodes.length > 0
+            ? Math.max(...sourceBranchNodes.map((n) => n.data?.step || 0))
+            : sourceStep;
+          const isAfterComplete = sourceBranchMaxStep >= 50;
+          
+          // 브랜치의 피드백 정보 가져오기
+          const branch = updatedSession.branches.find((b) => b.id === branchId);
+          const feedback = branch?.feedback || [];
+          const firstFeedback = feedback[0];
+          
+          await logActionAndSaveSession(
+            "branch_created",
+            {
+              sourceNodeId: sourceNodeIdForLogging,
+              sourceNodeStep: sourceStep,
+              sourceBranchId: sourceBranchId,
+              newBranchId: branchId,
+              feedback: firstFeedback ? {
+                type: firstFeedback.type,
+                area: firstFeedback.area,
+                text: firstFeedback.text,
+                imageUrl: firstFeedback.imageUrl,
+                point: firstFeedback.point,
+                bbox: firstFeedback.bbox,
+                guidanceScale: firstFeedback.guidanceScale,
+              } : {},
+              isAfterComplete: isAfterComplete,
+              sourceBranchMaxStep: sourceBranchMaxStep,
+            },
+            participant,
+            mode,
+            updatedSession,
+            bookmarkedNodeIds
+          ).catch((error) => {
+            console.error("[GraphCanvas] Failed to log branch_created:", error);
+          });
+        }, 100); // 100ms 지연으로 세션 업데이트 대기
+      }
 
       // Mock 모드 체크
       if (USE_MOCK_MODE) {
@@ -1925,6 +2084,28 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       
       console.log(`[GraphCanvas] Next Step: selectedNodeId=${selectedNodeId}, uniqueBranchId=${uniqueBranchId}, backendBranchId=${backendBranchId}, stepInterval=${stepInterval}`);
                 setIsStepping(true);
+      
+      // 로깅: Next Step 클릭
+      if (participant && mode) {
+        const sourceNode = currentGraphSession.nodes.find((n) => n.id === selectedNodeId);
+        const sourceStep = sourceNode?.data?.step || 0;
+        const nextPreviewStep = Math.ceil((sourceStep + 1) / stepInterval) * stepInterval;
+        await logActionAndSaveSession(
+          "next_step_clicked",
+          {
+            sourceNodeId: selectedNodeId,
+            sourceNodeStep: sourceStep,
+            branchId: uniqueBranchId || "",
+            expectedNextStep: nextPreviewStep,
+          },
+          participant,
+          mode,
+          currentGraphSession,
+          bookmarkedNodeIds
+        ).catch((error) => {
+          console.error("[GraphCanvas] Failed to log next_step_clicked:", error);
+        });
+      }
       
       // Get the last step in the branch (not the selected node's step)
       // This ensures loading node is created based on the branch's actual last step
@@ -2074,7 +2255,29 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           }
           
           // Pass uniqueBranchId explicitly to ensure correct branch association
-          addImageNode(currentGsId, parentNodeId, lastResp.preview_png_base64, actualStep, pos, undefined, uniqueBranchId);
+          const imageNodeId = addImageNode(currentGsId, parentNodeId, lastResp.preview_png_base64, actualStep, pos, undefined, uniqueBranchId);
+          
+          // 로깅: 이미지 수신
+          if (imageNodeId && participant && mode) {
+            const generationStartTime = performance.now(); // 실제로는 생성 시작 시간을 추적해야 함
+            await logActionAndSaveSession(
+              "image_received",
+              {
+                nodeId: imageNodeId,
+                branchId: uniqueBranchId || "",
+                step: actualStep,
+                imageUrl: lastResp.preview_png_base64,
+                generationDuration: 0, // TODO: 실제 생성 시간 추적 필요
+                sourceAction: "next_step",
+              },
+              participant,
+              mode,
+              gsAfterStep || currentGraphSession,
+              bookmarkedNodeIds
+            ).catch((error) => {
+              console.error("[GraphCanvas] Failed to log image_received:", error);
+            });
+          }
           
           // Ensure loading node is removed if it still exists (in case addImageNode didn't find it)
           if (loadingNodeId) {
@@ -2132,6 +2335,29 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       const graphSessionId = currentGraphSession.id;
       
       console.log(`[GraphCanvas] Run to End: selectedNodeId=${selectedNodeId}, uniqueBranchId=${uniqueBranchId}, backendBranchId=${backendBranchId}, stepInterval=${stepInterval}, backendSession=${backendSession}, graphSession=${graphSessionId}`);
+      
+      // 로깅: Run to End 시작
+      const sourceNode = currentGraphSession.nodes.find((n) => n.id === selectedNodeId);
+      const sourceStep = sourceNode?.data?.step || 0;
+      if (participant && mode) {
+        await logActionAndSaveSession(
+          "run_to_end_started",
+          {
+            sourceNodeId: selectedNodeId,
+            sourceNodeStep: sourceStep,
+            branchId: uniqueBranchId || "",
+            currentStep: sourceStep,
+            targetStep: 50,
+          },
+          participant,
+          mode,
+          currentGraphSession,
+          bookmarkedNodeIds
+        ).catch((error) => {
+          console.error("[GraphCanvas] Failed to log run_to_end_started:", error);
+        });
+      }
+      
       setIsRunningToEnd(true);
       isPausedRef.current = false;
       setIsPaused(false);
@@ -2284,7 +2510,28 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             // Position calculated with offset if prompt has been moved
             const pos = calculatePositionWithOffset(resp.i, rowIndex, promptNodeIdLocal, uniqueBranchId);
             // Pass uniqueBranchId explicitly to ensure correct branch association
-            addImageNodeFresh(currentGsId, parentNodeId, resp.preview_png_base64, resp.i, pos, undefined, uniqueBranchId);
+            const imageNodeId = addImageNodeFresh(currentGsId, parentNodeId, resp.preview_png_base64, resp.i, pos, undefined, uniqueBranchId);
+            
+            // 로깅: 이미지 수신 (Run to End)
+            if (imageNodeId && participant && mode && gs) {
+              await logActionAndSaveSession(
+                "image_received",
+                {
+                  nodeId: imageNodeId,
+                  branchId: uniqueBranchId || "",
+                  step: resp.i,
+                  imageUrl: resp.preview_png_base64,
+                  generationDuration: 0, // TODO: 실제 생성 시간 추적 필요
+                  sourceAction: "run_to_end",
+                },
+                participant,
+                mode,
+                gs,
+                bookmarkedNodeIds
+              ).catch((error) => {
+                console.error("[GraphCanvas] Failed to log image_received (run_to_end):", error);
+              });
+            }
             
             // Create loading node for the next preview step (if not at the end)
             if (!isLastStep) {
@@ -2312,11 +2559,44 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   }, [currentGraphSession, selectedNodeId, getTargetBranchFromSelectedNode, stepInterval, calculatePositionWithOffset, getBranchRowIndexLocal]);
 
   // Handle Pause button click
-  const handlePause = useCallback(() => {
+  const handlePause = useCallback(async () => {
     isPausedRef.current = true;
     setIsPaused(true);
     console.log("[GraphCanvas] Pause requested");
-  }, []);
+    
+    // 로깅: Run to End 정지
+    if (currentGraphSession && selectedNodeId && participant && mode) {
+      const sourceNode = currentGraphSession.nodes.find((n) => n.id === selectedNodeId);
+      const sourceStep = sourceNode?.data?.step || 0;
+      const uniqueBranchId = getTargetBranchFromSelectedNode();
+      
+      // 현재 브랜치의 최대 스텝 찾기
+      const branchNodes = currentGraphSession.nodes.filter((n) => {
+        if (n.type !== "image") return false;
+        const nodeBranchId = getNodeBranchId(n.id);
+        return nodeBranchId === uniqueBranchId;
+      });
+      const maxStep = branchNodes.length > 0
+        ? Math.max(...branchNodes.map((n) => n.data?.step || 0))
+        : sourceStep;
+      
+      await logActionAndSaveSession(
+        "run_to_end_paused",
+        {
+          branchId: uniqueBranchId || "",
+          pausedAtStep: maxStep,
+          totalStepsGenerated: branchNodes.length,
+          duration: 0, // TODO: 실제 시작 시간 추적 필요
+        },
+        participant,
+        mode,
+        currentGraphSession,
+        bookmarkedNodeIds
+      ).catch((error) => {
+        console.error("[GraphCanvas] Failed to log run_to_end_paused:", error);
+      });
+    }
+  }, [currentGraphSession, selectedNodeId, participant, mode, getTargetBranchFromSelectedNode, getNodeBranchId, bookmarkedNodeIds]);
 
   // Handle backtracking - remove selected node and all descendants
   const handleBacktrack = useCallback(async () => {
@@ -2359,8 +2639,42 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       
       console.log("[GraphCanvas] Backtrack result:", result);
       
+      // Get removed node IDs before removal
+      const getAllDescendantIds = (nodeId: string): string[] => {
+        const descendants: string[] = [nodeId];
+        const outgoingEdges = currentGraphSession.edges.filter((e) => e.source === nodeId);
+        for (const edge of outgoingEdges) {
+          descendants.push(...getAllDescendantIds(edge.target));
+        }
+        return descendants;
+      };
+      const removedNodeIds = getAllDescendantIds(selectedNodeId);
+      
       // Remove the node and its descendants from the frontend
       removeNodeAndDescendants(currentGraphSession.id, selectedNodeId);
+      
+      // 로깅: Backtrack
+      if (participant && mode) {
+        const updatedSession = useImageStore.getState().currentGraphSession;
+        if (updatedSession) {
+          await logActionAndSaveSession(
+            "backtrack",
+            {
+              targetNodeId: selectedNodeId,
+              targetStep: step,
+              branchId: uniqueBranchId || "",
+              backtrackToStep: step - 1,
+              removedNodeIds: removedNodeIds,
+            },
+            participant,
+            mode,
+            updatedSession,
+            bookmarkedNodeIds
+          ).catch((error) => {
+            console.error("[GraphCanvas] Failed to log backtrack:", error);
+          });
+        }
+      }
       
       console.log("[GraphCanvas] Backtrack completed");
     } catch (error) {
@@ -2496,6 +2810,28 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
           console.log("[GraphCanvas] 병렬 세션 프롬프트 노드 생성:", createdPromptNodeId);
           // Register the parallel session
           registerParallelSession(createdPromptNodeId, sessionId, activeBranchId);
+          
+          // 로깅: 프롬프트 노드 생성
+          if (participant && mode) {
+            const updatedSession = useImageStore.getState().currentGraphSession;
+            if (updatedSession) {
+              const createdNode = updatedSession.nodes.find((n) => n.id === createdPromptNodeId);
+              await logActionAndSaveSession(
+                "prompt_node_created",
+                {
+                  nodeId: createdPromptNodeId,
+                  prompt: prompt,
+                  compositionData: createdNode?.data?.compositionData,
+                },
+                participant,
+                mode,
+                updatedSession,
+                bookmarkedNodeIds
+              ).catch((error) => {
+                console.error("[GraphCanvas] Failed to log prompt_node_created:", error);
+              });
+            }
+          }
         }
       } else {
         // Create new graph session (first session)
@@ -2525,6 +2861,27 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       // 자동 진행은 하지 않고 Next Step 버튼으로 사용자 승인 시 진행
       useImageStore.getState().setBackendSessionMeta(sessionId, activeBranchId);
       console.log("[GraphCanvas] 세션 메타 설정 완료:", sessionId);
+
+      // 로깅: 생성 시작
+      if (createdPromptNodeId && currentGraphSession && participant && mode) {
+        const uniqueBranchId = createUniqueBranchId(sessionId, activeBranchId);
+        await logActionAndSaveSession(
+          "generation_started",
+          {
+            sourceNodeId: createdPromptNodeId,
+            sourceNodeType: "prompt",
+            branchId: uniqueBranchId,
+            prompt: prompt,
+            isRegeneration: hasGeneratedImages,
+          },
+          participant,
+          mode,
+          currentGraphSession,
+          bookmarkedNodeIds
+        ).catch((error) => {
+          console.error("[GraphCanvas] Failed to log generation_started:", error);
+        });
+      }
 
       // 생성된 노드 선택
       if (createdPromptNodeId) {
@@ -2947,9 +3304,36 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
             setCompositionModalVisible(false);
             setCompositionModalPromptNodeId(null);
           }}
-          onComplete={() => {
+          onComplete={async () => {
             setCompositionModalVisible(false);
             setCompositionModalPromptNodeId(null);
+            
+            // 로깅: Composition 설정 완료
+            if (compositionModalPromptNodeId && currentGraphSession && participant && mode) {
+              const promptNode = currentGraphSession.nodes.find((n) => n.id === compositionModalPromptNodeId);
+              if (promptNode && promptNode.type === "prompt") {
+                const compositionData = promptNode.data?.compositionData;
+                await logActionAndSaveSession(
+                  "composition_configured",
+                  {
+                    promptNodeId: compositionModalPromptNodeId,
+                    objects: compositionData?.bboxes?.map((bbox, idx) => ({
+                      id: bbox.objectId,
+                      label: bbox.objectId,
+                      color: bbox.color,
+                    })) || [],
+                    bboxes: compositionData?.bboxes || [],
+                    sketchLayers: compositionData?.sketchLayers || [],
+                  },
+                  participant,
+                  mode,
+                  currentGraphSession,
+                  bookmarkedNodeIds
+                ).catch((error) => {
+                  console.error("[GraphCanvas] Failed to log composition_configured:", error);
+                });
+              }
+            }
           }}
           initialPrompt={
             compositionModalPromptNodeId && currentGraphSession

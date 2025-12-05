@@ -1,0 +1,15 @@
+{
+  "logId": "e4951333-6bae-4385-b3ba-a5dea7e42730",
+  "timestamp": 1764944577266,
+  "participant": 1557,
+  "mode": "step",
+  "sessionId": "empty_1764944550592",
+  "action": "generation_started",
+  "data": {
+    "sourceNodeId": "node_prompt_1764944564934_7kx305bbe",
+    "sourceNodeType": "prompt",
+    "branchId": "sess_bf03f967_B0",
+    "prompt": "Ronaldo",
+    "isRegeneration": false
+  }
+}
