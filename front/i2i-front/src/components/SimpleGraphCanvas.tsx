@@ -701,7 +701,8 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
     const baseX = promptNode.position.x;
     const baseY = promptNode.position.y;
     const offsetX = 320;
-    const verticalSpacing = 240; // more vertical space between branched images
+    // Slightly tighter vertical spacing between generated image nodes
+    const verticalSpacing = 180;
     const startY = baseY - verticalSpacing * 1.5;
 
     const loadingNodeIds = Array.from({ length: 4 }, (_, index) => {
