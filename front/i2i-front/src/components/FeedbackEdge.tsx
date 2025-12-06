@@ -260,7 +260,7 @@ const FeedbackEdge: React.FC<FeedbackEdgeProps> = ({
                       {getAreaLabel(feedback.area)}
                     </GuidanceScaleBadge>
                     <GuidanceScaleBadge>
-                      {feedback.type === "text" ? "T" : "S"}: {feedback.guidanceScale?.toFixed(1) ?? (feedback.type === "image" ? "5.0" : "2.0")}
+                      {feedback.type === "text" ? "Temp" : "Temp"}: {feedback.guidanceScale?.toFixed(1) ?? (feedback.type === "image" ? "5.0" : "2.0")}
                     </GuidanceScaleBadge>
                   </FeedbackItemHeader>
                   {feedback.text && (

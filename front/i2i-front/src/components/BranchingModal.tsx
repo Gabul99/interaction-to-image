@@ -12,7 +12,6 @@ import { forkAtStep, applyGuidance } from "../lib/api";
 import ImageViewer from "./ImageViewer";
 import UnifiedCanvas from "./UnifiedCanvas";
 import FloatingToolbox from "./FloatingToolbox";
-import { API_BASE_URL } from "../config/api";
 
 const ModalOverlay = styled.div<{ visible: boolean }>`
   position: fixed;
@@ -418,6 +417,34 @@ const ReferenceGalleryRefreshButton = styled.button`
     cursor: default;
   }
 `;
+// Utility to shuffle arrays
+const shuffleArray = <T,>(arr: T[]): T[] => {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+};
+
+// Dynamically gather all preset reference images from src/assets (png/jpg/jpeg/webp)
+const ALL_PRESET_REFERENCE_IMAGES: { id: string; dataUrl: string }[] = (() => {
+  const modules = import.meta.glob("../assets/*.{png,jpg,jpeg,JPG,JPEG,webp}", {
+    eager: true,
+  }) as Record<string, { default: string }>;
+
+  return Object.entries(modules).map(([path, mod]) => {
+    const filename = path.split("/").pop() || path;
+    const id = filename.replace(/\.[^/.]+$/, "");
+    return { id, dataUrl: (mod as any).default };
+  });
+})();
+
+const getRandomPresetImages = (count: number): { id: string; dataUrl: string }[] => {
+  if (ALL_PRESET_REFERENCE_IMAGES.length === 0) return [];
+  const shuffled = shuffleArray(ALL_PRESET_REFERENCE_IMAGES);
+  return shuffled.slice(0, Math.min(count, shuffled.length));
+};
 
 const FormButtonGroup = styled.div`
   display: flex;
@@ -732,7 +759,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   
   // Guidance scale states
   const [textGuidanceScale, setTextGuidanceScale] = useState(2.0);
-  const [styleGuidanceScale, setStyleGuidanceScale] = useState(5.0);
+  const [styleGuidanceScale, setStyleGuidanceScale] = useState(2.0);
 
   // 도구 모드
   const [toolMode, setToolMode] = useState<ToolMode>("select");
@@ -749,7 +776,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   // Reference image gallery state
   const [referenceImages, setReferenceImages] = useState<
     { id: string; dataUrl: string }[]
-  >([]);
+  >(() => getRandomPresetImages(12));
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
   const [galleryError, setGalleryError] = useState<string | null>(null);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(
@@ -762,43 +789,6 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     const node = currentGraphSession.nodes.find((n) => n.id === nodeId);
     return node?.data?.imageUrl || null;
   }, [nodeId, currentGraphSession]);
-
-  // Load reference images when modal is visible and instruction type is image
-  React.useEffect(() => {
-    if (!visible || selectedType !== "image") return;
-
-    let cancelled = false;
-    const fetchGallery = async () => {
-      try {
-        setIsLoadingGallery(true);
-        setGalleryError(null);
-        const res = await fetch(
-          `${API_BASE_URL}/api/gallery/reference-images?limit=12`
-        );
-        if (!res.ok) {
-          throw new Error(`Failed to load reference images: ${res.status}`);
-        }
-        const data = await res.json();
-        if (!cancelled) {
-          setReferenceImages(Array.isArray(data.images) ? data.images : []);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          console.error("[BranchingModal] Failed to load reference images:", err);
-          setGalleryError("Failed to load reference images.");
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoadingGallery(false);
-        }
-      }
-    };
-
-    fetchGallery();
-    return () => {
-      cancelled = true;
-    };
-  }, [visible, selectedType]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -832,25 +822,10 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     setImagePreviewUrl(dataUrl);
   };
 
-  const handleRefreshReferenceImages = async () => {
-    try {
-      setIsLoadingGallery(true);
-      setGalleryError(null);
-      const res = await fetch(
-        `${API_BASE_URL}/api/gallery/reference-images?limit=12`
-      );
-      if (!res.ok) {
-        throw new Error(`Failed to load reference images: ${res.status}`);
-      }
-      const data = await res.json();
-      setReferenceImages(Array.isArray(data.images) ? data.images : []);
-      setSelectedReferenceId(null);
-    } catch (err) {
-      console.error("[BranchingModal] Failed to refresh reference images:", err);
-      setGalleryError("Failed to refresh reference images.");
-    } finally {
-      setIsLoadingGallery(false);
-    }
+  const handleRefreshReferenceImages = () => {
+    setReferenceImages(getRandomPresetImages(12));
+    setSelectedReferenceId(null);
+    setGalleryError(null);
   };
 
   const handleBboxClick = (bboxId: string) => {
@@ -1450,7 +1425,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                             </ReferenceGalleryHeader>
                             {isLoadingGallery && (
                               <InstructionText>
-                                Loading reference images...
+                                Loading preset images...
                               </InstructionText>
                             )}
                             {galleryError && (
