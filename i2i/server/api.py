@@ -27,6 +27,7 @@ from i2i.server.engine import (  # type: ignore
     fork_at_step_engine,
     backtrack_to_engine,
     merge_branches_engine,
+    mm,
 )
 
 
@@ -65,6 +66,31 @@ SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 # ============ FastAPI App ============ #
 app = FastAPI(title="I2I Interactive API")
+
+
+@app.on_event("startup")
+async def preload_i2i_model() -> None:
+    """
+    Eagerly load the PixArt i2i model on server startup so that
+    the first interactive request is fast.
+
+    Uses:
+      - I2I_MODEL_VERSION: "512" (default) or "1024"
+      - I2I_GPU_ID: which CUDA device index to use (default "0")
+    """
+    model_version = os.environ.get("I2I_MODEL_VERSION", "512")
+    try:
+        gpu_id = int(os.environ.get("I2I_GPU_ID", "0"))
+    except ValueError:
+        gpu_id = 0
+
+    try:
+        pipe, _tok, device = mm.ensure(model_version=model_version, gpu_id=gpu_id)
+        print(f"[i2i.api] Preloaded model {mm.model_id} on device {device} (version={model_version}, gpu_id={gpu_id})")
+    except Exception as e:
+        # Do not crash the server on startup; later requests will attempt lazy load.
+        print(f"[i2i.api] Failed to preload i2i model on startup: {e}")
+
 
 # CORS (adjust origins via env if needed)
 origins_env = os.environ.get("CORS_ALLOW_ORIGINS", "*")
