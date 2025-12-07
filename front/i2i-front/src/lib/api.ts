@@ -383,9 +383,7 @@ export async function saveSession(
   mode: string,
   participant: number,
   graphSession: GraphSession,
-  bookmarkedNodeIds?: string[],
-  lastLogId?: string,
-  lastLogTimestamp?: number
+  bookmarkedNodeIds?: string[]
 ): Promise<{ status: string; message?: string }> {
   const res = await fetch(`${API_BASE_URL}/api/session/save`, {
     method: "POST",
@@ -395,8 +393,6 @@ export async function saveSession(
       participant,
       graphSession,
       bookmarkedNodeIds: bookmarkedNodeIds || [],
-      lastLogId,
-      lastLogTimestamp,
     }),
   });
   if (!res.ok) {
