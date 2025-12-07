@@ -27,7 +27,6 @@ import {
   saveSession,
 } from "../api/simplePixArt";
 import type { GraphSession, GraphNode, GraphEdge } from "../types";
-import { logActionAndSaveSession } from "../utils/logging";
 
 const CanvasContainer = styled.div`
   width: 100%;
@@ -249,45 +248,8 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
             if (removedNode.type === "image") {
               const step = (removedNode.data as { step?: number })?.step || 0;
               
-              // 백트래킹 로깅 (삭제 전 세션 사용)
-              const graphSession = convertNodesToGraphSession(nodes, edges);
-              if (graphSession) {
-                await logActionAndSaveSession(
-                  "backtrack",
-                  {
-                    targetNodeId: removedNodeId,
-                    targetStep: step,
-                    branchId: "",
-                    backtrackToStep: step > 0 ? step - 1 : 0,
-                    removedNodeIds: removedNodeIds,
-                  },
-                  participant,
-                  mode,
-                  graphSession,
-                  bookmarkedNodeIds
-                ).catch((error) => {
-                  console.error("[SimpleGraphCanvas] Failed to log backtrack:", error);
-                });
-              }
             } else if (removedNode.type === "prompt") {
-              // 프롬프트 노드 삭제는 node_deleted로 로깅
-              const graphSession = convertNodesToGraphSession(nodes, edges);
-              if (graphSession) {
-                await logActionAndSaveSession(
-                  "node_deleted",
-                  {
-                    nodeId: removedNodeId,
-                    nodeType: "prompt",
-                    deletedNodeIds: removedNodeIds,
-                  },
-                  participant,
-                  mode,
-                  graphSession,
-                  bookmarkedNodeIds
-                ).catch((error) => {
-                  console.error("[SimpleGraphCanvas] Failed to log node_deleted:", error);
-                });
-              }
+              // 프롬프트 노드 삭제
             }
           }
         }
@@ -300,6 +262,28 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
   );
   const [activePromptId, setActivePromptId] = useState<string | null>(null);
   const [nextPromptIndex, setNextPromptIndex] = useState(1);
+
+  // 정기적 세션 저장 (1분마다)
+  useEffect(() => {
+    if (!participant || !mode) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const graphSession = convertNodesToGraphSession(nodes, edges);
+      if (graphSession) {
+        saveSession(mode, participant, graphSession, bookmarkedNodeIds)
+          .then(() => {
+            console.log("[SimpleGraphCanvas] Periodic session save completed");
+          })
+          .catch((error) => {
+            console.error("[SimpleGraphCanvas] Failed to save session periodically:", error);
+          });
+      }
+    }, 60000); // 1분 = 60000ms
+
+    return () => clearInterval(interval);
+  }, [mode, participant, nodes, edges, bookmarkedNodeIds]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const draggingPromptRef = useRef<{
     id: string;
@@ -533,51 +517,6 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
       const graphSession = convertNodesToGraphSession(nodes, edges);
       if (!graphSession) return;
       
-      for (const nodeId of newlyBookmarked) {
-        const node = nodes.find((n) => n.id === nodeId);
-        if (node && node.type === "image") {
-          const imageData = node.data as { imageUrl?: string; step?: number };
-          await logActionAndSaveSession(
-            "bookmark_toggled",
-            {
-              nodeId: nodeId,
-              nodeStep: imageData.step || 0,
-              branchId: "",
-              isBookmarked: true,
-              imageUrl: imageData.imageUrl || "",
-            },
-            participant,
-            mode,
-            graphSession,
-            bookmarkedNodeIds
-          ).catch((error) => {
-            console.error("[SimpleGraphCanvas] Failed to log bookmark_toggled:", error);
-          });
-        }
-      }
-      
-      for (const nodeId of newlyUnbookmarked) {
-        const node = nodes.find((n) => n.id === nodeId);
-        if (node && node.type === "image") {
-          const imageData = node.data as { imageUrl?: string; step?: number };
-          await logActionAndSaveSession(
-            "bookmark_toggled",
-            {
-              nodeId: nodeId,
-              nodeStep: imageData.step || 0,
-              branchId: "",
-              isBookmarked: false,
-              imageUrl: imageData.imageUrl || "",
-            },
-            participant,
-            mode,
-            graphSession,
-            bookmarkedNodeIds
-          ).catch((error) => {
-            console.error("[SimpleGraphCanvas] Failed to log bookmark_toggled:", error);
-          });
-        }
-      }
     };
     
     if (newlyBookmarked.length > 0 || newlyUnbookmarked.length > 0) {
@@ -753,25 +692,6 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
     setIsGenerating(true);
     setError(null);
     
-    // 로깅: Simple Generate 시작
-    const graphSession = convertNodesToGraphSession(nodes, edges);
-    if (participant && mode && graphSession) {
-      await logActionAndSaveSession(
-        "simple_generate",
-        {
-          promptNodeId: activePromptId,
-          prompt: promptText.trim(),
-          imageUrl: inputImageDataUrls.length > 0 ? inputImageDataUrls[0] : undefined,
-          isRegeneration: inputImageDataUrls.length > 0,
-        },
-        participant,
-        mode,
-        graphSession,
-        bookmarkedNodeIds
-      ).catch((error) => {
-        console.error("[SimpleGraphCanvas] Failed to log simple_generate:", error);
-      });
-    }
 
     const applyImages = async (res: SimpleGenerateResponse) => {
       const generationStartTime = Date.now();
@@ -834,23 +754,6 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
             const b64 = res.images[index];
             if (b64) {
               const nodeId = `${activePromptId}-image-${index + 1}`;
-              await logActionAndSaveSession(
-                "image_received",
-                {
-                  nodeId,
-                  branchId: "",
-                  step: index + 1,
-                  imageUrl: `data:image/png;base64,${b64}`,
-                  generationDuration,
-                  sourceAction: "simple_generate",
-                },
-                participant,
-                mode,
-                updatedGraphSession,
-                bookmarkedNodeIds
-              ).catch((error) => {
-                console.error("[SimpleGraphCanvas] Failed to log image_received:", error);
-              });
             }
           }
         }
@@ -906,24 +809,6 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
     setActivePromptId(id);
     setNextPromptIndex((prev) => prev + 1);
     
-    // 로깅: 프롬프트 노드 생성
-    const graphSession = convertNodesToGraphSession([...nodes, newNode], edges);
-    if (participant && mode && graphSession) {
-      const promptText = (newNode.data as SimplePromptNodeData).prompt || "";
-      await logActionAndSaveSession(
-        "prompt_node_created",
-        {
-          nodeId: id,
-          prompt: promptText,
-        },
-        participant,
-        mode,
-        graphSession,
-        bookmarkedNodeIds
-      ).catch((error) => {
-        console.error("[SimpleGraphCanvas] Failed to log prompt_node_created:", error);
-      });
-    }
   }, [nextPromptIndex, nodes, createPromptNode, participant, mode, edges, bookmarkedNodeIds]);
 
   const isGenerateDisabled =
@@ -1081,23 +966,6 @@ const SimpleGraphCanvas: React.FC<SimpleGraphCanvasProps> = ({ mode, participant
               }
             : n
         );
-        const updatedGraphSession = convertNodesToGraphSession(updatedNodes, edges);
-        if (updatedGraphSession) {
-          await logActionAndSaveSession(
-            "image_connected_to_prompt",
-            {
-              promptNodeId: targetNode.id,
-              imageNodeId: sourceNode.id,
-              imageUrl: imageUrl,
-            },
-            participant,
-            mode,
-            updatedGraphSession,
-            bookmarkedNodeIds
-          ).catch((error) => {
-            console.error("[SimpleGraphCanvas] Failed to log image_connected_to_prompt:", error);
-          });
-        }
       }
 
       setEdges((prev) => {

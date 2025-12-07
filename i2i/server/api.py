@@ -107,18 +107,6 @@ class SaveSessionReq(BaseModel):
     participant: int
     graphSession: Dict[str, Any]
     bookmarkedNodeIds: Optional[List[str]] = []
-    lastLogId: Optional[str] = None
-    lastLogTimestamp: Optional[int] = None
-
-
-class LogEntryReq(BaseModel):
-    logId: str
-    timestamp: int
-    participant: int
-    mode: str
-    sessionId: str
-    action: str
-    data: Dict[str, Any]
 
 
 # ---------- Compatibility: health ---------- #
@@ -681,8 +669,6 @@ async def save_session(req: SaveSessionReq):
             "graphSession": req.graphSession,
             "lastUpdated": datetime.now().isoformat() + "Z",
             "bookmarkedNodeIds": req.bookmarkedNodeIds or [],
-            "lastLogId": req.lastLogId,
-            "lastLogTimestamp": req.lastLogTimestamp,
         }
         
         # Write to file
@@ -725,47 +711,6 @@ async def load_session(mode: str, p: int):
             data = json.load(f)
         
         return JSONResponse(data)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.post("/api/logs/save")
-async def save_log(req: LogEntryReq):
-    """
-    Save a log entry to disk.
-    Saves to: logs/{mode}/p{participant}/logs_{timestamp}.json
-    """
-    try:
-        logs_dir = _get_logs_dir()
-        mode_dir = logs_dir / req.mode
-        participant_dir = mode_dir / f"p{req.participant}"
-        participant_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Generate timestamp for filename (use log timestamp)
-        timestamp_str = datetime.fromtimestamp(req.timestamp / 1000).strftime("%Y%m%d%H%M%S")
-        filename = f"logs_{timestamp_str}_{req.logId[:8]}.json"
-        filepath = participant_dir / filename
-        
-        # Prepare log data
-        log_data = {
-            "logId": req.logId,
-            "timestamp": req.timestamp,
-            "participant": req.participant,
-            "mode": req.mode,
-            "sessionId": req.sessionId,
-            "action": req.action,
-            "data": req.data,
-        }
-        
-        # Write to file
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(log_data, f, indent=2, ensure_ascii=False)
-        
-        return JSONResponse({
-            "status": "ok",
-            "message": f"Log saved to {filepath}",
-            "filepath": str(filepath),
-        })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
