@@ -452,34 +452,6 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     return () => clearInterval(interval);
   }, [mode, participant, currentGraphSession, bookmarkedNodeIds]);
 
-  // currentGraphSession 또는 bookmarkedNodeIds 변경 시 자동 저장 (debounce 적용)
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  useEffect(() => {
-    // participant가 없거나 mode가 없으면 저장하지 않음
-    if (!participant || !mode || !currentGraphSession) {
-      return;
-    }
-
-    // 이전 타이머 취소
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
-    }
-
-    // 10초 후에 저장 (debounce)
-    saveTimeoutRef.current = setTimeout(() => {
-      saveSessionToServer(mode, participant).catch((error) => {
-        console.error("[GraphCanvas] Failed to auto-save session:", error);
-      });
-    }, 10000);
-
-    // cleanup
-    return () => {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
-      }
-    };
-  }, [currentGraphSession, bookmarkedNodeIds, mode, participant, saveSessionToServer]);
-  
   // Backtracking state
   const [isBacktracking, setIsBacktracking] = useState(false);
 
@@ -614,14 +586,6 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     
     const currentBookmarked = bookmarkedNodeIds || [];
     const prevBookmarked = prevBookmarkedNodeIdsRef.current;
-    
-    // 새로 추가된 북마크
-    const newlyBookmarked = currentBookmarked.filter((id) => !prevBookmarked.includes(id));
-    // 제거된 북마크
-    const newlyUnbookmarked = prevBookmarked.filter((id) => !currentBookmarked.includes(id));
-    
-    // 로깅
-    }
     
     prevBookmarkedNodeIdsRef.current = currentBookmarked;
   }, [bookmarkedNodeIds, currentGraphSession, participant, mode, getNodeBranchId]);

@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import aiofiles
 from fastapi import FastAPI, UploadFile, File, Form, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -690,7 +691,7 @@ def _get_logs_dir() -> Path:
 async def save_session(req: SaveSessionReq):
     """
     Save a graph session to disk.
-    Saves to: logs/{mode}/p{participant}/session_{timestamp}.json
+    Saves to: logs/{mode}/p{participant}/session_latest.json (overwrites previous)
     """
     try:
         logs_dir = _get_logs_dir()
@@ -698,9 +699,8 @@ async def save_session(req: SaveSessionReq):
         participant_dir = mode_dir / f"p{req.participant}"
         participant_dir.mkdir(parents=True, exist_ok=True)
         
-        # Generate timestamp for filename
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        filename = f"session_{timestamp}.json"
+        # Use fixed filename to overwrite previous session (keep only latest)
+        filename = "session_latest.json"
         filepath = participant_dir / filename
         
         # Prepare data with lastUpdated timestamp
@@ -710,9 +710,12 @@ async def save_session(req: SaveSessionReq):
             "bookmarkedNodeIds": req.bookmarkedNodeIds or [],
         }
         
-        # Write to file
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        # Serialize JSON to string (without indent to reduce file size)
+        json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        
+        # Write asynchronously
+        async with aiofiles.open(filepath, 'w', encoding='utf-8') as f:
+            await f.write(json_str)
         
         return JSONResponse({
             "status": "ok",
@@ -781,18 +784,15 @@ async def load_session(mode: str, p: int):
         if not participant_dir.exists():
             return JSONResponse({"error": "No sessions found"}, status_code=404)
         
-        # Find all session files and get the most recent one
-        session_files = list(participant_dir.glob("session_*.json"))
-        if not session_files:
+        # Load the latest session file (fixed filename)
+        latest_file = participant_dir / "session_latest.json"
+        if not latest_file.exists():
             return JSONResponse({"error": "No sessions found"}, status_code=404)
         
-        # Sort by modification time (most recent first)
-        session_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        latest_file = session_files[0]
-        
-        # Read and return the session data
-        with open(latest_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        # Read and return the session data asynchronously
+        async with aiofiles.open(latest_file, 'r', encoding='utf-8') as f:
+            content = await f.read()
+        data = json.loads(content)
         
         return JSONResponse(data)
     except Exception as e:
