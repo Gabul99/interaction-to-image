@@ -3,6 +3,7 @@ import io
 import uuid
 import base64
 import json
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,6 +27,7 @@ from i2i.server.engine import (  # type: ignore
     fork_at_step_engine,
     backtrack_to_engine,
     merge_branches_engine,
+    mm,
 )
 
 
@@ -37,6 +39,18 @@ def _img_to_base64_png(img: Optional[Image.Image]) -> Optional[str]:
     img.save(buf, format="PNG")
     data = base64.b64encode(buf.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{data}"
+
+
+def _get_images_dir() -> Path:
+    """
+    Get the reference images directory.
+    Defaults to <repo_root>/i2i/images but can be overridden via I2I_IMAGES_DIR.
+    """
+    env_dir = os.environ.get("I2I_IMAGES_DIR")
+    if env_dir:
+        return Path(env_dir)
+    # api.py is at i2i/server/api.py -> go up one level to i2i/
+    return Path(__file__).resolve().parents[1] / "images"
 
 
 def _parse_bool(x: Optional[str]) -> bool:
@@ -52,6 +66,31 @@ SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 # ============ FastAPI App ============ #
 app = FastAPI(title="I2I Interactive API")
+
+
+@app.on_event("startup")
+async def preload_i2i_model() -> None:
+    """
+    Eagerly load the PixArt i2i model on server startup so that
+    the first interactive request is fast.
+
+    Uses:
+      - I2I_MODEL_VERSION: "512" (default) or "1024"
+      - I2I_GPU_ID: which CUDA device index to use (default "0")
+    """
+    model_version = os.environ.get("I2I_MODEL_VERSION", "512")
+    try:
+        gpu_id = int(os.environ.get("I2I_GPU_ID", "0"))
+    except ValueError:
+        gpu_id = 0
+
+    try:
+        pipe, _tok, device = mm.ensure(model_version=model_version, gpu_id=gpu_id)
+        print(f"[i2i.api] Preloaded model {mm.model_id} on device {device} (version={model_version}, gpu_id={gpu_id})")
+    except Exception as e:
+        # Do not crash the server on startup; later requests will attempt lazy load.
+        print(f"[i2i.api] Failed to preload i2i model on startup: {e}")
+
 
 # CORS (adjust origins via env if needed)
 origins_env = os.environ.get("CORS_ALLOW_ORIGINS", "*")
@@ -682,6 +721,51 @@ async def save_session(req: SaveSessionReq):
         })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------- Reference image gallery ---------- #
+@app.get("/api/gallery/reference-images")
+async def get_reference_images(limit: int = 8):
+    """
+    Return a random subset of reference images from the images folder as data URLs.
+    This is used by the frontend to show a gallery of example style images.
+    """
+    images_dir = _get_images_dir()
+    if not images_dir.exists() or not images_dir.is_dir():
+        return JSONResponse({"images": []})
+
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+    files = [p for p in images_dir.iterdir() if p.suffix.lower() in exts and p.is_file()]
+    if not files:
+        return JSONResponse({"images": []})
+
+    random.shuffle(files)
+    selected = files[: max(1, min(limit, 16))]
+
+    images: List[Dict[str, str]] = []
+    for p in selected:
+        try:
+            img = Image.open(p).convert("RGB")
+            data_url = _img_to_base64_png(img)
+            if data_url:
+                images.append(
+                    {
+                        "id": p.name,
+                        "dataUrl": data_url,
+                    }
+                )
+        except Exception:
+            continue
+
+    return JSONResponse({"images": images})
+
+
+@app.get("/api/gallery")
+async def get_reference_images_compat(limit: int = 8):
+    """
+    Backwards-compatible alias for /api/gallery/reference-images.
+    """
+    return await get_reference_images(limit=limit)
 
 
 @app.get("/api/session/load")

@@ -17,7 +17,7 @@ const NodeContainer = styled.div<{ selected: boolean }>`
   border-radius: 12px;
   padding: 8px;
   min-width: 180px;
-  max-width: 220px;
+  max-width: 120px;
   box-shadow: ${(props) =>
     props.selected
       ? "0 8px 32px rgba(99, 102, 241, 0.4)"

@@ -343,6 +343,109 @@ const RemoveImageButton = styled.button`
   }
 `;
 
+// Reference image gallery for style guidance
+const ReferenceGallery = styled.div`
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+`;
+
+const ReferenceImageButton = styled.button<{ selected: boolean }>`
+  position: relative;
+  padding: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid
+    ${(props) => (props.selected ? "#6366f1" : "rgba(148, 163, 184, 0.4)")};
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+
+  &:hover {
+    border-color: #6366f1;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(15, 23, 42, 0.5);
+  }
+`;
+
+const ReferenceImageThumb = styled.img`
+  width: 100%;
+  height: 64px;
+  object-fit: cover;
+  display: block;
+`;
+
+const ReferenceGalleryHeader = styled.div`
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #9ca3af;
+`;
+
+const ReferenceGalleryTitle = styled.span`
+  font-weight: 500;
+  color: #e5e7eb;
+`;
+
+const ReferenceGalleryHelper = styled.span`
+  font-size: 11px;
+  color: #6b7280;
+`;
+
+const ReferenceGalleryRefreshButton = styled.button`
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  background: rgba(15, 23, 42, 0.9);
+  color: #e5e7eb;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+
+  &:hover:not(:disabled) {
+    border-color: #6366f1;
+    color: #bfdbfe;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.6);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+`;
+// Utility to shuffle arrays
+const shuffleArray = <T,>(arr: T[]): T[] => {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+};
+
+// Dynamically gather all preset reference images from src/assets (png/jpg/jpeg/webp)
+const ALL_PRESET_REFERENCE_IMAGES: { id: string; dataUrl: string }[] = (() => {
+  const modules = import.meta.glob("../assets/*.{png,jpg,jpeg,JPG,JPEG,webp}", {
+    eager: true,
+  }) as Record<string, { default: string }>;
+
+  return Object.entries(modules).map(([path, mod]) => {
+    const filename = path.split("/").pop() || path;
+    const id = filename.replace(/\.[^/.]+$/, "");
+    return { id, dataUrl: (mod as any).default };
+  });
+})();
+
+const getRandomPresetImages = (count: number): { id: string; dataUrl: string }[] => {
+  if (ALL_PRESET_REFERENCE_IMAGES.length === 0) return [];
+  const shuffled = shuffleArray(ALL_PRESET_REFERENCE_IMAGES);
+  return shuffled.slice(0, Math.min(count, shuffled.length));
+};
+
 const FormButtonGroup = styled.div`
   display: flex;
   gap: 8px;
@@ -656,7 +759,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   
   // Guidance scale states
   const [textGuidanceScale, setTextGuidanceScale] = useState(2.0);
-  const [styleGuidanceScale, setStyleGuidanceScale] = useState(5.0);
+  const [styleGuidanceScale, setStyleGuidanceScale] = useState(2.0);
 
   // 도구 모드
   const [toolMode, setToolMode] = useState<ToolMode>("select");
@@ -669,6 +772,16 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const placeholderRef = useRef<HTMLDivElement>(null);
+
+  // Reference image gallery state
+  const [referenceImages, setReferenceImages] = useState<
+    { id: string; dataUrl: string }[]
+  >(() => getRandomPresetImages(12));
+  const [isLoadingGallery, setIsLoadingGallery] = useState(false);
+  const [galleryError, setGalleryError] = useState<string | null>(null);
+  const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(
+    null
+  );
 
   // 노드에서 이미지 URL 가져오기
   const nodeImageUrl = React.useMemo(() => {
@@ -686,6 +799,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
         setImagePreviewUrl(reader.result as string);
       };
       reader.readAsDataURL(file);
+      setSelectedReferenceId(null);
     }
   };
 
@@ -696,9 +810,22 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   const handleRemoveImage = () => {
     setImageFile(null);
     setImagePreviewUrl(null);
+    setSelectedReferenceId(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
+  };
+
+  const handleSelectReferenceImage = (id: string, dataUrl: string) => {
+    setSelectedReferenceId(id);
+    setImageFile(null); // Use reference image instead of uploaded file
+    setImagePreviewUrl(dataUrl);
+  };
+
+  const handleRefreshReferenceImages = () => {
+    setReferenceImages(getRandomPresetImages(12));
+    setSelectedReferenceId(null);
+    setGalleryError(null);
   };
 
   const handleBboxClick = (bboxId: string) => {
@@ -718,7 +845,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
 
   const handleSubmitFeedback = async () => {
     const hasText = text.trim().length > 0;
-    const hasImage = !!imageFile;
+    const hasImage = !!imageFile || !!imagePreviewUrl;
 
     if (!hasText && !hasImage) {
       return;
@@ -759,6 +886,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     setText("");
     setImageFile(null);
     setImagePreviewUrl(null);
+    setSelectedReferenceId(null);
     setSelectedType("text");
     setSelectedAreaType("full");
     setSelectedPartialTool(null);
@@ -916,10 +1044,8 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
       
       clearCurrentFeedbackList();
       
-      // Call onBranchCreated callback with the new branch ID and source node ID
-      // Note: websocketUrl is not available here, but can be passed if needed
       if (onBranchCreated) {
-        onBranchCreated(newBranchId, undefined, nodeId);
+        onBranchCreated(newBranchId);
       }
       
       onClose();
@@ -987,7 +1113,9 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
       (selectedAreaType === "partial" &&
         selectedPartialTool === "bbox" &&
         selectedBboxIdForFeedback !== null)) &&
-    (selectedType === "text" ? text.trim().length > 0 : imageFile !== null);
+    (selectedType === "text"
+      ? text.trim().length > 0
+      : imageFile !== null || !!imagePreviewUrl);
 
   const getAreaLabel = (area: FeedbackArea) => {
     if (area === "full") return "Full Image";
@@ -1275,15 +1403,68 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
 
                         {selectedType === "image" && (
                           <>
+                            {/* Reference image gallery */}
+                            <SectionTitle>Reference Images</SectionTitle>
+                            <ReferenceGalleryHeader>
+                              <ReferenceGalleryTitle>
+                                Preset Images
+                              </ReferenceGalleryTitle>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <ReferenceGalleryHelper>
+                                  Click to use as reference image
+                                </ReferenceGalleryHelper>
+                                <ReferenceGalleryRefreshButton
+                                  type="button"
+                                  onClick={handleRefreshReferenceImages}
+                                  disabled={isLoadingGallery}
+                                  title="Shuffle preset images"
+                                >
+                                  ↻
+                                </ReferenceGalleryRefreshButton>
+                              </div>
+                            </ReferenceGalleryHeader>
+                            {isLoadingGallery && (
+                              <InstructionText>
+                                Loading preset images...
+                              </InstructionText>
+                            )}
+                            {galleryError && (
+                              <InstructionText>
+                                {galleryError}
+                              </InstructionText>
+                            )}
+                            {!isLoadingGallery && referenceImages.length > 0 && (
+                              <ReferenceGallery>
+                                {referenceImages.map((img) => (
+                                  <ReferenceImageButton
+                                    key={img.id}
+                                    selected={selectedReferenceId === img.id}
+                                    onClick={() =>
+                                      handleSelectReferenceImage(
+                                        img.id,
+                                        img.dataUrl
+                                      )
+                                    }
+                                  >
+                                    <ReferenceImageThumb
+                                      src={img.dataUrl}
+                                      alt={img.id}
+                                    />
+                                  </ReferenceImageButton>
+                                ))}
+                              </ReferenceGallery>
+                            )}
+
+                            {/* File upload as alternative */}
                             <FileInput
                               ref={fileInputRef}
                               type="file"
                               accept="image/*"
                               onChange={handleFileSelect}
                             />
-                            {!imageFile ? (
+                            {!imageFile && !imagePreviewUrl ? (
                               <FileUploadButton onClick={handleFileUploadClick}>
-                                이미지 선택
+                                Choose Image
                               </FileUploadButton>
                             ) : (
                               <ImagePreview>
@@ -1298,7 +1479,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                             )}
                             <SliderContainer>
                               <SliderLabel>
-                                <span>Style Guidance Scale</span>
+                                <span>Temperature</span>
                                 <SliderValue>{styleGuidanceScale.toFixed(1)}</SliderValue>
                               </SliderLabel>
                               <Slider

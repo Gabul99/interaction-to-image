@@ -258,8 +258,8 @@ def _compose_full_prompt_with_gpt(
 
     system_msg = (
         "You are an assistant that generates a single, concise image generation prompt by integrating \
-        feedback to be applied on the previously generated image, based on the \
-        caption of the previously generated image and the current user prompt."
+        feedback to be applied on the previously generated images, based on the \
+        captions of the previously generated images and the current user prompt."
         
         # integrates feedback to be applied on the previous generated image.
 
@@ -308,7 +308,7 @@ def _caption_image_with_gpt(
     b64 = base64.b64encode(image_bytes).decode("utf-8")
 
     base_instruction = (
-        "You are an advanced AI assistant specializing in image analysis, providing a detailed description of a image."
+        "You are an advanced AI assistant specializing in image analysis, providing a concise description of a image."
         "Focus on visual content, style, lighting, composition, and mood. "
         "Do not mention that you are describing an image."
     )
@@ -355,12 +355,13 @@ def _caption_images_with_gpt(
     concatenates the captions into a single description.
     """
     captions: List[str] = []
-    for image_bytes in image_bytes_list:
-        captions.append(
-            _caption_image_with_gpt(
+    for i, image_bytes in enumerate(image_bytes_list):
+        caption = _caption_image_with_gpt(
                 image_bytes=image_bytes,
                 hint_prompt=hint_prompt,
             )
+        captions.append(
+            f"Image {i+1} caption: {caption}"
         )
     return "\n\n".join(captions).strip()
 
@@ -447,8 +448,14 @@ def generate_pil_images(
     """
     pipeline = load_pipeline()
 
-    used_seed = randomize_seed(seed)
-    generator = torch.Generator(device=pipeline.device).manual_seed(used_seed)
+    # Use a distinct seed (and torch.Generator) for each image while preserving
+    # a single "base" seed for reproducibility of the entire batch.
+    base_seed = randomize_seed(seed)
+    per_image_seeds = [base_seed + i for i in range(num_images)]
+    generators = [
+        torch.Generator(device=pipeline.device).manual_seed(s)
+        for s in per_image_seeds
+    ]
 
     print(f"num_inference_steps: {num_inference_steps}")
     result = pipeline(
@@ -457,7 +464,7 @@ def generate_pil_images(
         height=height,
         guidance_scale=guidance_scale,
         num_inference_steps=num_inference_steps,
-        generator=generator,
+        generator=generators,
         num_images_per_prompt=num_images,
         output_type="pil",
         max_sequence_length=512,
@@ -465,7 +472,7 @@ def generate_pil_images(
 
     # diffusers returns images as a list of PIL.Image.Image
     images: List[Image.Image] = result.images
-    return images, used_seed
+    return images, base_seed
 
 
 # =============================================================================
