@@ -215,10 +215,10 @@ const BookmarkPanel: React.FC<BookmarkPanelProps> = ({ onNodeClick, nodes: exter
       <BookmarkList>
         {bookmarkedNodes.length === 0 ? (
           <EmptyState>
-            <span style={{ fontSize: "14px", fontWeight: "bold" }}>No bookmarked images.</span>
+            <span style={{ fontSize: "14px", fontWeight: "bold" }}>No favorite images.</span>
             <br />
             <span style={{ fontSize: "11px", opacity: 0.7 }}>
-              Hover over image to bookmark.
+              Hover over image to add to favorites.
             </span>
           </EmptyState>
         ) : (

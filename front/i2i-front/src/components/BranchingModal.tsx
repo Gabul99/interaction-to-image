@@ -343,6 +343,22 @@ const RemoveImageButton = styled.button`
   }
 `;
 
+// Drag-and-drop upload zone for style reference image
+const UploadDropZone = styled.div<{ isDragOver: boolean }>`
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px dashed
+    ${(props) => (props.isDragOver ? "#6366f1" : "rgba(148, 163, 184, 0.6)")};
+  background: ${(props) =>
+    props.isDragOver ? "rgba(37, 99, 235, 0.12)" : "rgba(15, 23, 42, 0.6)"};
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+`;
+
 // Reference image gallery for style guidance
 const ReferenceGallery = styled.div`
   display: grid;
@@ -772,6 +788,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const placeholderRef = useRef<HTMLDivElement>(null);
+  const [isDragOverUpload, setIsDragOverUpload] = useState(false);
 
   // Reference image gallery state
   const [referenceImages, setReferenceImages] = useState<
@@ -820,6 +837,40 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
     setSelectedReferenceId(id);
     setImageFile(null); // Use reference image instead of uploaded file
     setImagePreviewUrl(dataUrl);
+  };
+
+  const handleUploadDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOverUpload(true);
+  };
+
+  const handleUploadDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOverUpload(false);
+  };
+
+  const handleUploadDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOverUpload(false);
+
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+
+    const file = files[0];
+    if (!file.type.startsWith("image/")) return;
+
+    setImageFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === "string") {
+        setImagePreviewUrl(reader.result);
+        setSelectedReferenceId(null);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleRefreshReferenceImages = () => {
@@ -1380,8 +1431,8 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                         {selectedType === "text" && (
                           <>
                             <TextArea
-                              placeholder="Enter desired attribute as short keyword or noun phrase..."
-                              value={text}
+                            placeholder={`Describe the desired attributes directly, without using any comparative expressions.${"\n"}(e.g., make hair darker -> black hair)`}
+                            value={text}
                               onChange={(e) => setText(e.target.value)}
                             />
                             <SliderContainer>
@@ -1455,7 +1506,7 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                               </ReferenceGallery>
                             )}
 
-                            {/* File upload as alternative */}
+                            {/* File upload as alternative (click or drag & drop) */}
                             <FileInput
                               ref={fileInputRef}
                               type="file"
@@ -1463,9 +1514,15 @@ const BranchingModal: React.FC<BranchingModalProps> = ({
                               onChange={handleFileSelect}
                             />
                             {!imageFile && !imagePreviewUrl ? (
-                              <FileUploadButton onClick={handleFileUploadClick}>
-                                Choose Image
-                              </FileUploadButton>
+                              <UploadDropZone
+                                isDragOver={isDragOverUpload}
+                                onClick={handleFileUploadClick}
+                                onDragOver={handleUploadDragOver}
+                                onDragLeave={handleUploadDragLeave}
+                                onDrop={handleUploadDrop}
+                              >
+                                Upload Image or drop here
+                              </UploadDropZone>
                             ) : (
                               <ImagePreview>
                                 <PreviewImage

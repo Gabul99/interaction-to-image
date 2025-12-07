@@ -134,6 +134,9 @@ class BacktrackReq(BaseModel):
 
 class MergeBranchesReq(BaseModel):
     session_id: str
+    # Optional: when provided, branch_id_2 is taken from this session instead
+    # of `session_id`, enabling merges across different session states.
+    source_session_id: Optional[str] = None
     branch_id_1: str
     branch_id_2: str
     step_index_1: int  # Step to use from branch_1
@@ -643,6 +646,13 @@ def merge_branches(req: MergeBranchesReq):
         state = SESSIONS.get(req.session_id)
         if state is None:
             return JSONResponse({"error": "Invalid session_id"}, status_code=404)
+
+        # Optional: allow branch_2 to come from a different session/state.
+        state_for_branch_2 = state
+        if req.source_session_id is not None and req.source_session_id != req.session_id:
+            state_for_branch_2 = SESSIONS.get(req.source_session_id)
+            if state_for_branch_2 is None:
+                return JSONResponse({"error": "Invalid source_session_id"}, status_code=404)
         
         state, msg, new_branch_id = merge_branches_engine(
             state=state,
@@ -651,6 +661,7 @@ def merge_branches(req: MergeBranchesReq):
             step_index_1=int(req.step_index_1),
             step_index_2=int(req.step_index_2) if req.step_index_2 is not None else None,
             merge_weight=float(req.merge_weight),
+            state_for_branch_2=state_for_branch_2,
         )
         SESSIONS[req.session_id] = state
         

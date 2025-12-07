@@ -190,7 +190,7 @@ const PromptNode: React.FC<PromptNodeProps> = ({ data, selected }) => {
             onClick={handleGenerateClick}
             disabled={!data.prompt || data.prompt.trim().length === 0}
           >
-            {data.hasGeneratedImages ? "Regenerate" : "Start"}
+            {data.hasGeneratedImages ? "Restart" : "Start"}
           </GenerateButton>
         </ActionRow>
       </NodeContainer>

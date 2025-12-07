@@ -238,7 +238,6 @@ const MergeDescription = styled.p`
   color: #9ca3af;
   font-size: 14px;
   line-height: 1.6;
-  margin: 0 0 20px 0;
 `;
 
 const MergeButtonRow = styled.div`
@@ -377,7 +376,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const [isRunningToEnd, setIsRunningToEnd] = useState(false);
   
   // Step interval for preview visualization (default: 4 = show every 4th step)
-  const [stepInterval, setStepInterval] = useState(4);
+  const [stepInterval, setStepInterval] = useState(5);
   
   // Pause control for Run to End - using ref so it can be checked synchronously in the loop
   const isPausedRef = useRef(false);
@@ -1480,16 +1479,25 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     const { getBackendSessionForNode } = useImageStore.getState();
     const sourceNodeSession = getBackendSessionForNode(mergeSourceNode.id);
     const targetNodeSession = getBackendSessionForNode(mergeTargetNode.id);
-    
-    // Verify both nodes are from the same session (merging across sessions is not supported)
-    if (sourceNodeSession?.sessionId !== targetNodeSession?.sessionId) {
-      console.error("[GraphCanvas] Cannot merge: nodes are from different sessions");
-      alert("Cannot merge nodes from different sessions");
-      setMergeConfirmVisible(false);
-      return;
-    }
-    
-    const sessionId = sourceNodeSession?.sessionId || backendSessionId || currentGraphSession.id;
+
+    const sourceBackendSessionId = sourceNodeSession?.sessionId;
+    const targetBackendSessionId = targetNodeSession?.sessionId;
+
+    // Decide which backend session will own the merged branch.
+    // Default: use the source node's backend session; fall back to target node,
+    // then to global backendSessionId, then to graphSession id.
+    const sessionId =
+      sourceBackendSessionId ||
+      targetBackendSessionId ||
+      backendSessionId ||
+      currentGraphSession.id;
+
+    // If nodes come from different backend sessions, let the backend know
+    // that branch_2 should be taken from the other session.
+    const sourceSessionIdForBranch2 =
+      targetBackendSessionId && targetBackendSessionId !== sessionId
+        ? targetBackendSessionId
+        : undefined;
     
     // Get unique branch IDs for frontend operations
     const sourceUniqueBranchId = getNodeBranchId(mergeSourceNode.id);
@@ -1527,9 +1535,28 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
     // Calculate column for merged node - should be at the same column as the node with larger step
     const mergeColumn = getColumnIndexForStep(mergeStartStep, largerStepBranchId);
     
-    // Calculate row index for the new branch
-    const nonMainBranches = currentGraphSession.branches.filter((b) => extractBackendBranchId(b.id) !== "B0");
-    const newBranchRowIndex = nonMainBranches.length + 1; // +1 because main branch is row 0
+    // Calculate row index for the new merged branch, respecting per-session layout.
+    // Use the backend session that will own the merged branch (sessionId).
+    let newBranchRowIndex = 1;
+    if (currentGraphSession && sessionId) {
+      // Determine base row for this backend session (prompt node's rowIndex)
+      let baseRow = 0;
+      const promptNodeForSession = currentGraphSession.nodes.find(
+        (n) => n.type === "prompt" && n.data?.backendSessionId === sessionId
+      );
+      if (promptNodeForSession?.data?.rowIndex !== undefined) {
+        baseRow = promptNodeForSession.data.rowIndex as number;
+      }
+
+      // Count how many non-main branches already exist for this backend session
+      const sessionNonMainBranches = currentGraphSession.branches.filter(
+        (b) =>
+          b.backendSessionId === sessionId &&
+          extractBackendBranchId(b.id) !== "B0"
+      );
+
+      newBranchRowIndex = baseRow + 1 + sessionNonMainBranches.length;
+    }
     
     // Calculate position for loading/merged node
     let mergeNodePosition: { x: number; y: number };
@@ -1578,6 +1605,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         step_index_1: sourceStep,
         step_index_2: targetStep,
         merge_weight: 0.5,
+        source_session_id: sourceSessionIdForBranch2,
       });
 
       console.log("[GraphCanvas] Merge result:", result);
@@ -1711,7 +1739,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         removeLoadingNodeCleanup(graphSessionId, loadingNodeId);
         console.log(`[GraphCanvas] Removed loading node on error: ${loadingNodeId}`);
       }
-      alert("브랜치 병합에 실패했습니다.");
+      alert("Failed to merge branches.");
     } finally {
       setIsMerging(false);
       setMergeConfirmVisible(false);
@@ -3233,7 +3261,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
               ? "Fill prompt"
               : isBranchCompleted
               ? "Completed ✓"
-              : "Run to End"}
+              : "Finish Generation"}
           </button>
 
           {/* Pause Button - only visible when running */}
@@ -3350,40 +3378,40 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
       {mergeConfirmVisible && mergeSourceNode && mergeTargetNode && (
         <MergeConfirmModal onClick={handleMergeCancel}>
           <MergeConfirmContent onClick={(e) => e.stopPropagation()}>
-            <MergeTitle>🔀 브랜치 병합</MergeTitle>
+            <MergeTitle>🔀 Merge Branches</MergeTitle>
             <MergeDescription>
-              두 브랜치를 병합하시겠습니까?
+              Do you want to merge the two branches?
               <br />
               <br />
-              <strong>소스:</strong> {getNodeBranchId(mergeSourceNode.id)} (Step{" "}
-              {mergeSourceNode.data?.step})
-              <br />
-              <strong>타겟:</strong> {getNodeBranchId(mergeTargetNode.id)} (Step{" "}
-              {mergeTargetNode.data?.step})
-              <br />
-              <br />
+                {/* <strong>소스:</strong> {getNodeBranchId(mergeSourceNode.id)} (Step{" "}
+                {mergeSourceNode.data?.step})
+                <br />
+                <strong>타겟:</strong> {getNodeBranchId(mergeTargetNode.id)} (Step{" "}
+                {mergeTargetNode.data?.step})
+                <br />
+                <br /> */}
               {mergeSourceNode.data?.step !== mergeTargetNode.data?.step ? (
                 <>
-                  <span style={{ color: "#fbbf24" }}>⚠️ 서로 다른 스텝의 latent를 병합합니다.</span>
+                  <span style={{ color: "#fbbf24" }}>⚠️ We are merging latent from different steps.</span>
                   <br />
-                  병합된 브랜치는 스텝 {Math.max(mergeSourceNode.data?.step ?? 0, mergeTargetNode.data?.step ?? 0)}부터 시작합니다.
+                  The merged branch will start from step {Math.max(mergeSourceNode.data?.step ?? 0, mergeTargetNode.data?.step ?? 0)}.
                   <br />
                   <br />
                 </>
               ) : null}
-              병합된 브랜치는 두 브랜치의 가이던스 설정을 모두 유지하며,
-              Extended Attention을 사용하여 두 latent를 결합합니다.
+              {/* 병합된 브랜치는 두 브랜치의 가이던스 설정을 모두 유지하며,
+              Extended Attention을 사용하여 두 latent를 결합합니다. */}
             </MergeDescription>
             <MergeButtonRow>
               <MergeButton onClick={handleMergeCancel} disabled={isMerging}>
-                취소
+                Cancel
               </MergeButton>
               <MergeButton
                 primary
                 onClick={handleMergeConfirm}
                 disabled={isMerging}
               >
-                {isMerging ? "병합 중..." : "병합"}
+                {isMerging ? "Merging..." : "Merge"}
               </MergeButton>
             </MergeButtonRow>
           </MergeConfirmContent>

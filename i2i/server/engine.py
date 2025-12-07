@@ -884,6 +884,39 @@ def _merge_guidance_settings(br1: Dict[str, Any], br2: Dict[str, Any], step_inde
     return merged
 
 
+def _find_snapshot_at_or_before_step(
+    br: Dict[str, Any],
+    target_step: int,
+    num_steps: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Find snapshot at target_step; if not found, use the nearest snapshot
+    with i <= target_step. Returns None if history is empty.
+    """
+    target_step = int(max(0, min(target_step, num_steps)))
+    history = br.get("history", [])
+    snap = None
+    for s in history:
+        if int(s["i"]) == target_step:
+            snap = s
+            break
+    if snap is not None:
+        return snap
+    if len(history) == 0:
+        return None
+    all_is = sorted(int(s["i"]) for s in history)
+    nearest = 0
+    for val in all_is:
+        if val <= target_step:
+            nearest = val
+        else:
+            break
+    for s in history:
+        if int(s["i"]) == nearest:
+            return s
+    return None
+
+
 def merge_branches_engine(
     state: Dict[str, Any],
     branch_id_1: str,
@@ -891,6 +924,7 @@ def merge_branches_engine(
     step_index_1: int,
     step_index_2: Optional[int] = None,  # If None, uses step_index_1 for both
     merge_weight: float = 0.5,  # Weight for branch_1's latent (0.5 = equal blend)
+    state_for_branch_2: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], str, Optional[str]]:
     """
     Merge two branches, allowing different steps for each branch.
@@ -912,67 +946,35 @@ def merge_branches_engine(
     Returns:
         (state, status_message, new_branch_id or None if failed)
     """
-    branches = state.get("branches", {})
-    
-    if branch_id_1 not in branches:
+    # Branch 1 always comes from the target state; branch 2 can optionally
+    # come from a different session/state (e.g., merging across sessions).
+    branches_target = state.get("branches", {})
+    if branch_id_1 not in branches_target:
         return state, f"Branch {branch_id_1} not found.", None
-    if branch_id_2 not in branches:
+    state_b2 = state_for_branch_2 or state
+    branches_b2 = state_b2.get("branches", {})
+    if branch_id_2 not in branches_b2:
         return state, f"Branch {branch_id_2} not found.", None
-    if branch_id_1 == branch_id_2:
+    if branch_id_1 == branch_id_2 and state_b2 is state:
         return state, "Cannot merge a branch with itself.", None
-    
-    br1 = branches[branch_id_1]
-    br2 = branches[branch_id_2]
-    
+
+    br1 = branches_target[branch_id_1]
+    br2 = branches_b2[branch_id_2]
+
     # Default step_index_2 to step_index_1 if not provided
     if step_index_2 is None:
         step_index_2 = step_index_1
-    
-    step_index_1 = int(max(0, min(step_index_1, state["num_steps"])))
-    step_index_2 = int(max(0, min(step_index_2, state["num_steps"])))
-    
-    # Find snapshot for branch 1 at step_index_1
-    snap1 = None
-    for s in br1["history"]:
-        if int(s["i"]) == step_index_1:
-            snap1 = s
-            break
-    
-    # If exact step not found, use nearest available step <= target
-    if snap1 is None:
-        all_is = sorted([int(s["i"]) for s in br1["history"]])
-        nearest = 0
-        for val in all_is:
-            if val <= step_index_1:
-                nearest = val
-            else:
-                break
-        for s in br1["history"]:
-            if int(s["i"]) == nearest:
-                snap1 = s
-                break
-    
-    # Find snapshot for branch 2 at step_index_2
-    snap2 = None
-    for s in br2["history"]:
-        if int(s["i"]) == step_index_2:
-            snap2 = s
-            break
-    
-    # If exact step not found, use nearest available step <= target
-    if snap2 is None:
-        all_is = sorted([int(s["i"]) for s in br2["history"]])
-        nearest = 0
-        for val in all_is:
-            if val <= step_index_2:
-                nearest = val
-            else:
-                break
-        for s in br2["history"]:
-            if int(s["i"]) == nearest:
-                snap2 = s
-                break
-    
+
+    num_steps_1 = int(state.get("num_steps", 0))
+    num_steps_2 = int(state_b2.get("num_steps", num_steps_1))
+
+    step_index_1 = int(max(0, min(step_index_1, num_steps_1)))
+    step_index_2 = int(max(0, min(step_index_2, num_steps_2)))
+
+    # Find snapshots for each branch
+    snap1 = _find_snapshot_at_or_before_step(br1, step_index_1, num_steps_1)
+    snap2 = _find_snapshot_at_or_before_step(br2, step_index_2, num_steps_2)
+
     if snap1 is None:
         return state, f"Could not find valid snapshot for {branch_id_1} at or before step {step_index_1}.", None
     if snap2 is None:
@@ -983,6 +985,15 @@ def merge_branches_engine(
     
     latents1 = snap1["latents"].detach().clone()
     latents2 = snap2["latents"].detach().clone()
+
+    # Ensure latents are compatible (same shape) before blending
+    if latents1.shape != latents2.shape:
+        return (
+            state,
+            f"Latent shapes do not match for branches {branch_id_1} and {branch_id_2}: "
+            f"{tuple(latents1.shape)} vs {tuple(latents2.shape)}.",
+            None,
+        )
     
     # Create merged latent as weighted average for initial state
     merge_weight = float(max(0.0, min(1.0, merge_weight)))
@@ -990,7 +1001,7 @@ def merge_branches_engine(
     
     # The merged branch starts from the later of the two steps
     # This ensures we continue from a valid point in the denoising process
-    merge_start_step = max(actual_step_1, actual_step_2)
+    merge_start_step = min(max(actual_step_1, actual_step_2), num_steps_1)
     
     # Merge guidance settings using the later step
     merged_guidance = _merge_guidance_settings(br1, br2, merge_start_step)
@@ -1049,7 +1060,7 @@ def merge_branches_engine(
     }
     new_br["history"].append(initial_snap)
     
-    branches[new_id] = new_br
+    branches_target[new_id] = new_br
     state["active_branch_id"] = new_id
     
     print(f"[merge_branches_engine] Created merged branch {new_id} from {branch_id_1}@step{actual_step_1} and {branch_id_2}@step{actual_step_2}")

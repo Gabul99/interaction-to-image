@@ -350,6 +350,7 @@ export async function mergeBranches(params: {
   step_index_1: number;  // Step to use from branch_1
   step_index_2?: number; // Step to use from branch_2 (defaults to step_index_1)
   merge_weight?: number; // Weight for branch_1's latent (0.5 = equal blend)
+  source_session_id?: string; // Optional: when provided, branch_2 is taken from this session
 }): Promise<MergeBranchesResponse> {
   const res = await fetch(`${API_BASE_URL}/api/session/merge-branches`, {
     method: "POST",
@@ -361,6 +362,7 @@ export async function mergeBranches(params: {
       step_index_1: params.step_index_1,
       step_index_2: params.step_index_2 ?? null,
       merge_weight: params.merge_weight ?? 0.5,
+      source_session_id: params.source_session_id ?? null,
     }),
   });
   const data = await res.json();
